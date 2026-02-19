@@ -1,0 +1,19 @@
+[package]
+name = "exploretui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "exploretui"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared" }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+crux_http = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+futures = "0.3"
