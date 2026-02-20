@@ -1,5 +1,5 @@
 {
-  description = "exploretui — Grafana Explore for the terminal";
+  description = "grafex — Grafana Explore for the terminal";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

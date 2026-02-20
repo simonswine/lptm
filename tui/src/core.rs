@@ -35,8 +35,19 @@ fn process_effects(
             Effect::Http(mut request) => {
                 let core = core.clone();
                 let render_tx = render_tx.clone();
+                let method = request.operation.method.clone();
+                let url = request.operation.url.clone();
+                log::debug!("→ {method} {url}");
                 tokio::spawn(async move {
                     let result = crate::http::execute(&request.operation).await;
+                    match &result {
+                        crux_http::protocol::HttpResult::Ok(resp) => {
+                            log::debug!("← {method} {url} [{}]", resp.status);
+                        }
+                        crux_http::protocol::HttpResult::Err(e) => {
+                            log::debug!("← {method} {url} [error: {e}]");
+                        }
+                    }
                     match core.resolve(&mut request, result) {
                         Ok(new_effects) => {
                             process_effects(new_effects, core, render_tx);
