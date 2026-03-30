@@ -68,6 +68,8 @@ pub enum Event {
     TriggerCompletions,
 
     // Datasource filter
+    DatasourceFilterFocus,
+    DatasourceFilterBlur,
     DatasourceFilterInput(char),
     DatasourceFilterBackspace,
     DatasourceFilterClear,
@@ -171,6 +173,7 @@ pub struct Model {
     pub selected_index: usize,
 
     pub datasource_filter: String,
+    pub datasource_filter_focused: bool,
     pub favourites: HashSet<String>, // datasource UIDs
 
     pub screen: Screen,
@@ -252,6 +255,7 @@ pub struct ViewModel {
     pub selected_index: usize,
 
     pub datasource_filter: String,
+    pub datasource_filter_focused: bool,
 
     pub screen: ScreenView,
     pub query: String,
@@ -368,6 +372,16 @@ impl App for ExploreTui {
 
             Event::Quit => Command::done(),
 
+            Event::DatasourceFilterFocus => {
+                model.datasource_filter_focused = true;
+                render()
+            }
+
+            Event::DatasourceFilterBlur => {
+                model.datasource_filter_focused = false;
+                render()
+            }
+
             Event::DatasourceFilterInput(c) => {
                 model.datasource_filter.push(c);
                 model.selected_index = 0;
@@ -382,6 +396,7 @@ impl App for ExploreTui {
 
             Event::DatasourceFilterClear => {
                 model.datasource_filter.clear();
+                model.datasource_filter_focused = false;
                 model.selected_index = 0;
                 render()
             }
@@ -565,6 +580,7 @@ impl App for ExploreTui {
 
         ViewModel {
             datasource_filter: model.datasource_filter.clone(),
+            datasource_filter_focused: model.datasource_filter_focused,
             datasources,
             loading: model.loading,
             error: model.error.clone(),

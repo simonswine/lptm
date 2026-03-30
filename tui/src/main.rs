@@ -228,11 +228,32 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         break;
                                     }
                                     (KeyCode::Esc, _) => {
-                                        if !vm.datasource_filter.is_empty() {
+                                        if vm.datasource_filter_focused
+                                            || !vm.datasource_filter.is_empty()
+                                        {
                                             app_core.update(Event::DatasourceFilterClear);
                                         } else {
                                             break;
                                         }
+                                    }
+                                    // ── Filter focused mode ──────────────────
+                                    _ if vm.datasource_filter_focused => {
+                                        match key.code {
+                                            KeyCode::Enter => {
+                                                app_core.update(Event::DatasourceFilterBlur);
+                                            }
+                                            KeyCode::Backspace => {
+                                                app_core.update(Event::DatasourceFilterBackspace);
+                                            }
+                                            KeyCode::Char(c) => {
+                                                app_core.update(Event::DatasourceFilterInput(c));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    // ── Navigation mode ──────────────────────
+                                    (KeyCode::Char('/'), _) => {
+                                        app_core.update(Event::DatasourceFilterFocus);
                                     }
                                     (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
                                         app_core.update(Event::SelectNext);
@@ -240,8 +261,19 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
                                         app_core.update(Event::SelectPrevious);
                                     }
-                                    (KeyCode::Backspace, _) => {
-                                        app_core.update(Event::DatasourceFilterBackspace);
+                                    (KeyCode::Char('f'), _) => {
+                                        if let Some(ds) = vm.datasources.get(vm.selected_index) {
+                                            let uid = ds.uid.clone();
+                                            app_core.update(Event::ToggleFavourite(uid));
+                                            let vm2 = app_core.core.view();
+                                            let fav_uids: Vec<String> = vm2
+                                                .datasources
+                                                .iter()
+                                                .filter(|d| d.is_favourite)
+                                                .map(|d| d.uid.clone())
+                                                .collect();
+                                            save_favourites(&url_hash, &fav_uids);
+                                        }
                                     }
                                     (KeyCode::Enter, _) => {
                                         if let Some(ds) = vm.datasources.get(vm.selected_index) {
@@ -277,25 +309,6 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                             history_pos = None;
                                             app_core.update(Event::EnterQuery);
                                         }
-                                    }
-                                    (KeyCode::Char('f'), _)
-                                        if vm.datasource_filter.is_empty() =>
-                                    {
-                                        if let Some(ds) = vm.datasources.get(vm.selected_index) {
-                                            let uid = ds.uid.clone();
-                                            app_core.update(Event::ToggleFavourite(uid));
-                                            let vm2 = app_core.core.view();
-                                            let fav_uids: Vec<String> = vm2
-                                                .datasources
-                                                .iter()
-                                                .filter(|d| d.is_favourite)
-                                                .map(|d| d.uid.clone())
-                                                .collect();
-                                            save_favourites(&url_hash, &fav_uids);
-                                        }
-                                    }
-                                    (KeyCode::Char(c), _) => {
-                                        app_core.update(Event::DatasourceFilterInput(c));
                                     }
                                     _ => {}
                                 }
@@ -560,7 +573,7 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
 
     let footer_text = match vm.screen {
         ScreenView::DatasourceList => {
-            "Esc: Quit/Clear  j/↓: Next  k/↑: Prev  Enter: Select  f: Favourite  Type: Filter"
+            "Esc: Quit/Clear  j/↓: Next  k/↑: Prev  Enter: Select  f: Favourite  /: Filter"
         }
         ScreenView::QueryMode => {
             "Ctrl+C: Quit  Esc: Back  Enter: Execute  Tab: Complete  ↓/↑: History/Select  ←/→: Cursor"
@@ -625,16 +638,28 @@ fn render_datasource_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     let [filter_area, list_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
 
-    let filter_line = if vm.datasource_filter.is_empty() {
+    let filter_line = if vm.datasource_filter_focused {
+        if vm.datasource_filter.is_empty() {
+            Line::from(vec![
+                Span::styled("/ ", Style::default().fg(Color::DarkGray)),
+                Span::styled("_", Style::default().fg(Color::Yellow)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("/ ", Style::default().fg(Color::DarkGray)),
+                Span::raw(vm.datasource_filter.clone()),
+                Span::styled("_", Style::default().fg(Color::Yellow)),
+            ])
+        }
+    } else if vm.datasource_filter.is_empty() {
         Line::from(Span::styled(
-            "/ type to filter…",
+            "/ to filter…",
             Style::default().fg(Color::DarkGray),
         ))
     } else {
         Line::from(vec![
             Span::styled("/ ", Style::default().fg(Color::DarkGray)),
             Span::raw(vm.datasource_filter.clone()),
-            Span::styled("_", Style::default().fg(Color::Yellow)),
         ])
     };
     frame.render_widget(Paragraph::new(filter_line), filter_area);
