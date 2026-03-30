@@ -106,6 +106,13 @@ pub enum Event {
     PyroscopeTimeRangeCommit { now_unix_ms: i64 },
     PyroscopeTimeRangeAbort,
 
+    PyroscopeProfileTypeNext,
+    PyroscopeProfileTypePrev,
+
+    PyroscopeServiceFilterInput(char),
+    PyroscopeServiceFilterBackspace,
+    PyroscopeServiceFilterClear,
+
     PyroscopeSelectSeries { now_unix_ms: i64 },
     PyroscopeFlamegraphLoaded(Result<Option<FlameGraph>, String>),
 
@@ -118,6 +125,7 @@ pub enum Event {
     FlameMoveDown,
     FlameZoomIn,
     FlameZoomOut,
+    FlamegraphViewportChars(u64),
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -185,6 +193,9 @@ pub struct Model {
     pub pyroscope_series_loading: bool,
     pub pyroscope_series_error: Option<String>,
     pub pyroscope_series: Vec<PyroscopeSeriesItem>,
+    pub pyroscope_profile_types: Vec<String>,
+    pub pyroscope_profile_type_index: usize,
+    pub pyroscope_service_filter: String,
     pub pyroscope_series_index: usize,
     pub pyroscope_selected_service: String,
     pub pyroscope_selected_profile_type: String,
@@ -253,7 +264,10 @@ pub struct ViewModel {
     pub pyroscope_time_range_editing: bool,
     pub pyroscope_series_loading: bool,
     pub pyroscope_series_error: Option<String>,
-    pub pyroscope_series: Vec<(String, String)>, // (service_name, profile_type_id)
+    pub pyroscope_series: Vec<(String, String)>, // filtered by profile type + service filter
+    pub pyroscope_profile_types: Vec<String>,
+    pub pyroscope_profile_type_index: usize,
+    pub pyroscope_service_filter: String,
     pub pyroscope_series_index: usize,
     pub pyroscope_selected_service: String,
     pub pyroscope_selected_profile_type: String,
@@ -425,6 +439,21 @@ impl App for ExploreTui {
             Event::PyroscopeTimeRangeAbort => {
                 crate::pyroscope::app::handle_pyroscope_time_range_abort(model)
             }
+            Event::PyroscopeProfileTypeNext => {
+                crate::pyroscope::app::handle_pyroscope_profile_type_next(model)
+            }
+            Event::PyroscopeProfileTypePrev => {
+                crate::pyroscope::app::handle_pyroscope_profile_type_prev(model)
+            }
+            Event::PyroscopeServiceFilterInput(c) => {
+                crate::pyroscope::app::handle_pyroscope_service_filter_input(model, c)
+            }
+            Event::PyroscopeServiceFilterBackspace => {
+                crate::pyroscope::app::handle_pyroscope_service_filter_backspace(model)
+            }
+            Event::PyroscopeServiceFilterClear => {
+                crate::pyroscope::app::handle_pyroscope_service_filter_clear(model)
+            }
             Event::PyroscopeSelectSeries { .. } => {
                 crate::pyroscope::app::handle_pyroscope_select_series(model)
             }
@@ -439,6 +468,9 @@ impl App for ExploreTui {
             Event::FlameMoveDown => crate::pyroscope::app::handle_flame_move_down(model),
             Event::FlameZoomIn => crate::pyroscope::app::handle_flame_zoom_in(model),
             Event::FlameZoomOut => crate::pyroscope::app::handle_flame_zoom_out(model),
+            Event::FlamegraphViewportChars(chars) => {
+                crate::pyroscope::app::handle_flamegraph_viewport_chars(model, chars)
+            }
         }
     }
 
@@ -493,10 +525,18 @@ impl App for ExploreTui {
             PyroscopeSubScreen::Flamegraph => PyroscopeSubScreenView::Flamegraph,
         };
 
-        let pyroscope_series: Vec<(String, String)> = model
-            .pyroscope_series
+        let pyroscope_filtered = filtered_pyroscope_series_indices(model);
+        let pyroscope_series_index = if pyroscope_filtered.is_empty() {
+            0
+        } else {
+            model.pyroscope_series_index.min(pyroscope_filtered.len() - 1)
+        };
+        let pyroscope_series: Vec<(String, String)> = pyroscope_filtered
             .iter()
-            .map(|item| (item.service_name.clone(), item.profile_type_id.clone()))
+            .map(|&i| {
+                let item = &model.pyroscope_series[i];
+                (item.service_name.clone(), item.profile_type_id.clone())
+            })
             .collect();
 
         ViewModel {
@@ -521,7 +561,10 @@ impl App for ExploreTui {
             pyroscope_series_loading: model.pyroscope_series_loading,
             pyroscope_series_error: model.pyroscope_series_error.clone(),
             pyroscope_series,
-            pyroscope_series_index: model.pyroscope_series_index,
+            pyroscope_profile_types: model.pyroscope_profile_types.clone(),
+            pyroscope_profile_type_index: model.pyroscope_profile_type_index,
+            pyroscope_service_filter: model.pyroscope_service_filter.clone(),
+            pyroscope_series_index,
             pyroscope_selected_service: model.pyroscope_selected_service.clone(),
             pyroscope_selected_profile_type: model.pyroscope_selected_profile_type.clone(),
             pyroscope_flamegraph_loading: model.pyroscope_flamegraph_loading,
@@ -557,6 +600,22 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
         }
     }
     true
+}
+
+pub(crate) fn filtered_pyroscope_series_indices(model: &Model) -> Vec<usize> {
+    let profile_type = model
+        .pyroscope_profile_types
+        .get(model.pyroscope_profile_type_index)
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    model
+        .pyroscope_series
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.profile_type_id == profile_type)
+        .filter(|(_, item)| fuzzy_match(&item.service_name, &model.pyroscope_service_filter))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 pub(crate) fn filtered_datasource_indices(model: &Model) -> Vec<usize> {
@@ -795,7 +854,78 @@ mod tests {
         core.process_event(Event::PyroscopeSeriesLoaded(Ok(series)));
 
         let vm = core.view();
-        assert_eq!(vm.pyroscope_series.len(), 2);
+        // Two distinct profile types extracted from the series
+        assert_eq!(vm.pyroscope_profile_types.len(), 2);
+        // Filtered to the first profile type (alphabetically), so 1 visible service
+        assert_eq!(vm.pyroscope_series.len(), 1);
+    }
+
+    #[test]
+    fn pyroscope_profile_type_cycling() {
+        let core = make_core();
+        core.process_event(Event::Configure {
+            url: "http://localhost:3000".into(),
+            token: "test-token".into(),
+        });
+        let response = ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        core.process_event(Event::DatasourcesLoaded(Ok(response)));
+        core.process_event(Event::SelectNext);
+        core.process_event(Event::SelectNext);
+        core.process_event(Event::EnterPyroscope { now_unix_ms: 1_000_000 });
+
+        let series = vec![
+            ("svc-a".into(), "cpu:cpu:nanoseconds:cpu:nanoseconds".into()),
+            ("svc-b".into(), "cpu:cpu:nanoseconds:cpu:nanoseconds".into()),
+            ("svc-a".into(), "memory:alloc_objects:count:space:bytes".into()),
+        ];
+        core.process_event(Event::PyroscopeSeriesLoaded(Ok(series)));
+
+        // First profile type selected (alphabetically: cpu:...)
+        let vm = core.view();
+        assert_eq!(vm.pyroscope_profile_type_index, 0);
+        assert_eq!(vm.pyroscope_series.len(), 2); // svc-a and svc-b under cpu
+
+        // Cycle to next profile type
+        core.process_event(Event::PyroscopeProfileTypeNext);
+        let vm = core.view();
+        assert_eq!(vm.pyroscope_profile_type_index, 1);
+        assert_eq!(vm.pyroscope_series.len(), 1); // only svc-a under memory
+
+        // Cycle back
+        core.process_event(Event::PyroscopeProfileTypePrev);
+        assert_eq!(core.view().pyroscope_profile_type_index, 0);
+    }
+
+    #[test]
+    fn pyroscope_service_filter() {
+        let core = make_core();
+        core.process_event(Event::Configure {
+            url: "http://localhost:3000".into(),
+            token: "test-token".into(),
+        });
+        let response = ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        core.process_event(Event::DatasourcesLoaded(Ok(response)));
+        core.process_event(Event::SelectNext);
+        core.process_event(Event::SelectNext);
+        core.process_event(Event::EnterPyroscope { now_unix_ms: 1_000_000 });
+
+        let series = vec![
+            ("alpha".into(), "cpu:cpu:nanoseconds:cpu:nanoseconds".into()),
+            ("beta".into(), "cpu:cpu:nanoseconds:cpu:nanoseconds".into()),
+            ("gamma".into(), "cpu:cpu:nanoseconds:cpu:nanoseconds".into()),
+        ];
+        core.process_event(Event::PyroscopeSeriesLoaded(Ok(series)));
+
+        assert_eq!(core.view().pyroscope_series.len(), 3);
+
+        // Type filter
+        core.process_event(Event::PyroscopeServiceFilterInput('b'));
+        assert_eq!(core.view().pyroscope_series.len(), 1);
+        assert_eq!(core.view().pyroscope_series[0].0, "beta");
+
+        // Clear filter
+        core.process_event(Event::PyroscopeServiceFilterClear);
+        assert_eq!(core.view().pyroscope_series.len(), 3);
     }
 
     #[test]

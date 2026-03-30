@@ -18,6 +18,28 @@ pub struct Level {
     pub values: Vec<i64>,
 }
 
+impl FlameGraph {
+    /// Convert level values from Pyroscope's delta-encoded format to absolute x offsets.
+    ///
+    /// Pyroscope encodes each group of 4 as `[gap, total, self, name_idx]` where
+    /// `gap` is the number of samples between the previous frame's end and this
+    /// frame's start (not an absolute position).  After calling this, `values[i*4]`
+    /// is the absolute x offset of frame `i`, matching the rest of the code.
+    pub fn normalize_deltas(&mut self) {
+        for level in &mut self.levels {
+            let mut abs_x: i64 = 0;
+            let count = level.values.len() / 4;
+            for i in 0..count {
+                let gap = level.values[i * 4];
+                let width = level.values[i * 4 + 1];
+                abs_x += gap;
+                level.values[i * 4] = abs_x;
+                abs_x += width;
+            }
+        }
+    }
+}
+
 // ── Navigation state (not serialised – lives only in Model) ───────────────────
 
 /// Zoom and selection state for flamegraph exploration.
@@ -31,15 +53,24 @@ pub struct FlamegraphNav {
     pub sel_level: usize,
     /// Currently highlighted frame index (group-of-4) within `sel_level`.
     pub sel_frame: usize,
+    /// Terminal width in characters — used to skip sub-pixel frames during navigation.
+    pub viewport_chars: u64,
 }
 
 impl Default for FlamegraphNav {
     fn default() -> Self {
-        FlamegraphNav { root_level: 0, root_frame: 0, sel_level: 0, sel_frame: 0 }
+        FlamegraphNav { root_level: 0, root_frame: 0, sel_level: 0, sel_frame: 0, viewport_chars: 200 }
     }
 }
 
 impl FlamegraphNav {
+    /// Minimum frame width (in samples) to be considered navigable.
+    /// Frames narrower than this render as 0 characters and should be skipped.
+    fn min_nav_width(&self, root_w: u64) -> u64 {
+        if self.viewport_chars == 0 { return 1; }
+        root_w / self.viewport_chars
+    }
+
     /// `(x_start, width)` of the current root frame in samples.
     fn root_bounds(&self, fg: &FlameGraph) -> (u64, u64) {
         fg.levels
@@ -67,8 +98,9 @@ impl FlamegraphNav {
     pub fn move_right(&mut self, fg: &FlameGraph) {
         let Some(lv) = fg.levels.get(self.sel_level) else { return };
         let (rx, rw) = self.root_bounds(fg);
+        let min_w = self.min_nav_width(rw);
         for i in (self.sel_frame + 1)..(lv.values.len() / 4) {
-            if frame_visible(&lv.values, i, rx, rw) {
+            if frame_visible(&lv.values, i, rx, rw) && lv.values[i * 4 + 1] as u64 > min_w {
                 self.sel_frame = i;
                 return;
             }
@@ -78,8 +110,9 @@ impl FlamegraphNav {
     pub fn move_left(&mut self, fg: &FlameGraph) {
         let Some(lv) = fg.levels.get(self.sel_level) else { return };
         let (rx, rw) = self.root_bounds(fg);
+        let min_w = self.min_nav_width(rw);
         for i in (0..self.sel_frame).rev() {
-            if frame_visible(&lv.values, i, rx, rw) {
+            if frame_visible(&lv.values, i, rx, rw) && lv.values[i * 4 + 1] as u64 > min_w {
                 self.sel_frame = i;
                 return;
             }
@@ -93,11 +126,13 @@ impl FlamegraphNav {
             return;
         }
         let Some((sx, se)) = self.sel_bounds(fg) else { return };
+        let (_, rw) = self.root_bounds(fg);
+        let min_w = self.min_nav_width(rw);
         let lv = &fg.levels[new_level].values;
         for i in 0..(lv.len() / 4) {
             let off = lv[i * 4] as u64;
             let w = lv[i * 4 + 1] as u64;
-            if w > 0 && off + w > sx && off < se {
+            if w > min_w && off + w > sx && off < se {
                 self.sel_level = new_level;
                 self.sel_frame = i;
                 return;
@@ -113,12 +148,13 @@ impl FlamegraphNav {
         let new_level = self.sel_level - 1;
         let Some((sx, se)) = self.sel_bounds(fg) else { return };
         let (rx, rw) = self.root_bounds(fg);
+        let min_w = self.min_nav_width(rw);
         let lv = &fg.levels[new_level].values;
         // Prefer the frame that fully contains the selection.
         for i in 0..(lv.len() / 4) {
             let off = lv[i * 4] as u64;
             let w = lv[i * 4 + 1] as u64;
-            if frame_visible(lv, i, rx, rw) && off <= sx && off + w >= se {
+            if frame_visible(lv, i, rx, rw) && w > min_w && off <= sx && off + w >= se {
                 self.sel_level = new_level;
                 self.sel_frame = i;
                 return;
@@ -126,7 +162,7 @@ impl FlamegraphNav {
         }
         // Fallback: first visible frame in parent level.
         for i in 0..(lv.len() / 4) {
-            if frame_visible(lv, i, rx, rw) {
+            if frame_visible(lv, i, rx, rw) && lv[i * 4 + 1] as u64 > min_w {
                 self.sel_level = new_level;
                 self.sel_frame = i;
                 return;
@@ -234,7 +270,18 @@ pub fn build_flamegraph_view(fg: &FlameGraph, nav: &FlamegraphNav) -> Flamegraph
                 continue;
             }
 
+            // Clip frame to the current viewport so partial frames don't bleed
+            // outside the visible range (causes misalignment when zoomed in).
+            let vis_start = offset.max(root_x);
+            let vis_end = (offset + total).min(root_x + root_w);
+            let x_start = vis_start - root_x;
+            let clipped_width = vis_end.saturating_sub(vis_start);
+            if clipped_width == 0 {
+                continue;
+            }
+
             let name = fg.names.get(name_idx).cloned().unwrap_or_default();
+            // total_pct uses the unclipped sample count (represents true coverage).
             let total_pct = total as f64 / root_w as f64 * 100.0;
             let self_pct = self_samples as f64 / root_w as f64 * 100.0;
             let is_selected = level_idx == nav.sel_level && i == nav.sel_frame;
@@ -247,8 +294,8 @@ pub fn build_flamegraph_view(fg: &FlameGraph, nav: &FlamegraphNav) -> Flamegraph
 
             frames.push(FlamegraphFrameView {
                 name,
-                x_start: offset.saturating_sub(root_x),
-                width: total,
+                x_start,
+                width: clipped_width,
                 self_samples,
                 total_pct,
                 self_pct,

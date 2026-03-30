@@ -15,18 +15,30 @@ pub fn render_pyroscope_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
 }
 
 fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let title_line = if vm.pyroscope_time_range_editing {
-        Line::from(vec![
-            Span::raw(" Services — Last ["),
-            Span::styled(
-                format!("{}_", vm.pyroscope_time_range),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw("] "),
-        ])
+    let time_range_span = if vm.pyroscope_time_range_editing {
+        Span::styled(
+            format!("{}_", vm.pyroscope_time_range),
+            Style::default().fg(Color::Yellow),
+        )
     } else {
-        Line::from(format!(" Services — Last [{}] ", vm.pyroscope_time_range))
+        Span::styled(vm.pyroscope_time_range.clone(), Style::default().fg(Color::Yellow))
     };
+
+    let mut title_spans = vec![Span::raw(" Services — Last ["), time_range_span, Span::raw("]")];
+    if let Some(pt) = vm.pyroscope_profile_types.get(vm.pyroscope_profile_type_index) {
+        let n = vm.pyroscope_profile_types.len();
+        let idx = vm.pyroscope_profile_type_index + 1;
+        title_spans.push(Span::raw("  ·  "));
+        title_spans.push(Span::styled(pt.clone(), Style::default().fg(Color::Cyan)));
+        if n > 1 {
+            title_spans.push(Span::styled(
+                format!(" ({idx}/{n})"),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+    title_spans.push(Span::raw(" "));
+    let title_line = Line::from(title_spans);
 
     let block = Block::default().borders(Borders::ALL).title(title_line);
 
@@ -48,42 +60,53 @@ fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) 
         return;
     }
 
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let split = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+    let filter_area = split[0];
+    let list_area = split[1];
+
+    // Filter line (like datasource page)
+    let filter_line = if vm.pyroscope_service_filter.is_empty() {
+        Line::from(Span::styled("/ type to filter…", Style::default().fg(Color::DarkGray)))
+    } else {
+        Line::from(vec![
+            Span::styled("/ ", Style::default().fg(Color::DarkGray)),
+            Span::raw(vm.pyroscope_service_filter.clone()),
+            Span::styled("_", Style::default().fg(Color::Yellow)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(filter_line), filter_area);
+
     if vm.pyroscope_series.is_empty() {
+        let msg = if vm.pyroscope_profile_types.is_empty() {
+            "No services found."
+        } else if vm.pyroscope_series_loading {
+            "Fetching services…"
+        } else if !vm.pyroscope_service_filter.is_empty() {
+            "No matches."
+        } else {
+            "No services found."
+        };
         frame.render_widget(
-            Paragraph::new("No services found.")
-                .style(Style::default().fg(Color::DarkGray))
-                .block(block),
-            area,
+            Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
+            list_area,
         );
         return;
     }
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let header_cells = ["Service", "Profile Type"].iter().map(|h| {
-        Cell::from(*h).style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-    });
-    let header = Row::new(header_cells);
+    let header = Row::new([Cell::from("Service").style(
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )]);
 
     let rows: Vec<Row> = vm
         .pyroscope_series
         .iter()
-        .map(|(service, profile_type)| {
-            Row::new(vec![
-                Cell::from(service.clone()),
-                Cell::from(profile_type.clone()),
-            ])
-        })
+        .map(|(service, _)| Row::new([Cell::from(service.clone())]))
         .collect();
 
-    let widths = [Constraint::Percentage(40), Constraint::Percentage(60)];
-
-    let table = Table::new(rows, widths)
+    let table = Table::new(rows, [Constraint::Fill(1)])
         .header(header)
         .highlight_symbol(">> ")
         .row_highlight_style(
@@ -95,7 +118,7 @@ fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) 
     let mut table_state = TableState::default();
     table_state.select(Some(vm.pyroscope_series_index));
 
-    frame.render_stateful_widget(table, inner, &mut table_state);
+    frame.render_stateful_widget(table, list_area, &mut table_state);
 }
 
 fn render_pyroscope_flamegraph_screen(frame: &mut Frame, vm: &ViewModel, area: Rect) {
@@ -116,10 +139,10 @@ fn render_pyroscope_flamegraph_screen(frame: &mut Frame, vm: &ViewModel, area: R
     ]);
     frame.render_widget(Paragraph::new(info_content).block(info_block), info_area);
 
-    let fg_block = Block::default().borders(Borders::ALL).title(" Flamegraph ");
+    let fg_block = Block::default().borders(Borders::ALL).title(" Icicle Graph ");
     if vm.pyroscope_flamegraph_loading {
         frame.render_widget(
-            Paragraph::new("Loading flamegraph…").block(fg_block),
+            Paragraph::new("Loading icicle graph…").block(fg_block),
             fg_area,
         );
     } else if let Some(ref err) = vm.pyroscope_flamegraph_error {
@@ -149,13 +172,13 @@ fn render_flamegraph(frame: &mut Frame, fg: &FlamegraphView, block: Block, area:
         return;
     }
 
-    // Last row is the status line; remaining rows for flamegraph levels.
+    // Last row is the status line; remaining rows for icicle levels (root at top).
     let usable_h = inner.height - 1;
     let w = inner.width as u64;
     let n_visible = fg.levels.len().min(usable_h as usize);
 
     for li in 0..n_visible {
-        let row_y = inner.y + (inner.height - 2) - li as u16;
+        let row_y = inner.y + li as u16;
         let row_area = Rect::new(inner.x, row_y, inner.width, 1);
 
         let mut spans: Vec<Span> = Vec::new();
@@ -174,12 +197,11 @@ fn render_flamegraph(frame: &mut Frame, fg: &FlamegraphView, block: Block, area:
             }
 
             let label = center_truncate(&frame_view.name, char_w);
+            let base_style = Style::default().fg(Color::Black).bg(frame_color(&frame_view.name));
             let style = if frame_view.is_selected {
-                Style::default().fg(Color::Black).bg(Color::Yellow)
+                base_style.add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(frame_color(&frame_view.name))
+                base_style
             };
             spans.push(Span::styled(label, style));
             x_cursor = x_char_end;

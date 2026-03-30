@@ -400,7 +400,11 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         } else {
                                             match key.code {
                                                 KeyCode::Esc => {
-                                                    app_core.update(Event::BackFromPyroscope);
+                                                    if !vm.pyroscope_service_filter.is_empty() {
+                                                        app_core.update(Event::PyroscopeServiceFilterClear);
+                                                    } else {
+                                                        app_core.update(Event::BackFromPyroscope);
+                                                    }
                                                 }
                                                 KeyCode::Char('j') | KeyCode::Down => {
                                                     app_core.update(Event::PyroscopeSeriesNext);
@@ -411,6 +415,15 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 KeyCode::Char('t') => {
                                                     app_core.update(Event::PyroscopeTimeRangeEdit);
                                                 }
+                                                KeyCode::Char('[') => {
+                                                    app_core.update(Event::PyroscopeProfileTypePrev);
+                                                }
+                                                KeyCode::Char(']') => {
+                                                    app_core.update(Event::PyroscopeProfileTypeNext);
+                                                }
+                                                KeyCode::Backspace => {
+                                                    app_core.update(Event::PyroscopeServiceFilterBackspace);
+                                                }
                                                 KeyCode::Enter => {
                                                     let now = now_unix_secs() as i64 * 1000;
                                                     // Read the selected series before firing the event.
@@ -420,6 +433,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                     let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
                                                     let time_range = vm.pyroscope_time_range.clone();
                                                     app_core.update(Event::PyroscopeSelectSeries { now_unix_ms: now });
+                                                    if let Ok(size) = terminal.size() {
+                                                        app_core.update(Event::FlamegraphViewportChars(size.width.saturating_sub(2) as u64));
+                                                    }
                                                     if let (Some((service, profile_type)), Some(ds_id)) = (selected, ds_id) {
                                                         spawn_flamegraph_fetch(
                                                             &pyroscope_tx,
@@ -432,6 +448,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                             now,
                                                         );
                                                     }
+                                                }
+                                                KeyCode::Char(c) => {
+                                                    app_core.update(Event::PyroscopeServiceFilterInput(c));
                                                 }
                                                 _ => {}
                                             }
@@ -449,10 +468,10 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 app_core.update(Event::FlameMoveRight);
                                             }
                                             KeyCode::Up | KeyCode::Char('k') => {
-                                                app_core.update(Event::FlameMoveUp);
+                                                app_core.update(Event::FlameMoveDown);
                                             }
                                             KeyCode::Down | KeyCode::Char('j') => {
-                                                app_core.update(Event::FlameMoveDown);
+                                                app_core.update(Event::FlameMoveUp);
                                             }
                                             KeyCode::Enter | KeyCode::Char('z') => {
                                                 app_core.update(Event::FlameZoomIn);
@@ -467,7 +486,8 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                             }
                         }
                     }
-                    CrosstermEvent::Resize(_, _) => {
+                    CrosstermEvent::Resize(w, _) => {
+                        app_core.update(Event::FlamegraphViewportChars(w.saturating_sub(2) as u64));
                         let vm = app_core.core.view();
                         terminal.draw(|frame| ui(frame, &vm))?;
                     }
@@ -501,10 +521,10 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
                 "Esc: Cancel  Enter: Apply"
             }
             PyroscopeSubScreenView::ServiceList => {
-                "Esc: Back  j/k: Next/Prev  Enter: Select  t: Time Range"
+                "Esc: Back/Clear  j/k: Next/Prev  Enter: Select  t: Time Range  [/]: Profile Type  Type: Filter"
             }
             PyroscopeSubScreenView::Flamegraph => {
-                "Esc: List  ←→↑↓/hjkl: Navigate  Enter/z: Zoom In  o: Zoom Out"
+                "Esc: List  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller  Enter/z: Zoom In  o: Zoom Out"
             }
         },
     };

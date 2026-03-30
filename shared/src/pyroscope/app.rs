@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
+
 use crux_core::{render::render, Command};
 
 use crate::app::{
-    filtered_datasource_indices, Effect, Event, Model, PyroscopeSeriesItem, PyroscopeSubScreen,
-    Screen,
+    filtered_datasource_indices, filtered_pyroscope_series_indices, Effect, Event, Model,
+    PyroscopeSeriesItem, PyroscopeSubScreen, Screen,
 };
 use crate::pyroscope::FlamegraphNav;
 
@@ -25,7 +27,9 @@ pub fn handle_enter_pyroscope(model: &mut Model) -> Command<Effect, Event> {
     model.pyroscope_series_loading = true;
     model.pyroscope_series_error = None;
     model.pyroscope_series.clear();
+    model.pyroscope_profile_types.clear();
     model.pyroscope_series_index = 0;
+    model.pyroscope_service_filter.clear();
 
     render()
 }
@@ -37,6 +41,7 @@ pub fn handle_pyroscope_series_loaded(
     match result {
         Ok(series) => {
             model.pyroscope_series_loading = false;
+            let was_empty = model.pyroscope_profile_types.is_empty();
             model.pyroscope_series = series
                 .into_iter()
                 .map(|(service, profile_type)| PyroscopeSeriesItem {
@@ -44,6 +49,28 @@ pub fn handle_pyroscope_series_loaded(
                     profile_type_id: profile_type,
                 })
                 .collect();
+
+            // Extract sorted unique profile types
+            model.pyroscope_profile_types = model
+                .pyroscope_series
+                .iter()
+                .map(|item| item.profile_type_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+
+            // On first entry (profile_types was empty) prefer the cpu profile type.
+            // On reload (time range change) preserve the current selection, just clamp.
+            if was_empty {
+                let preferred = "cpu:cpu:nanoseconds:cpu:nanoseconds";
+                model.pyroscope_profile_type_index = model
+                    .pyroscope_profile_types
+                    .iter()
+                    .position(|pt| pt == preferred)
+                    .unwrap_or(0);
+            } else if model.pyroscope_profile_type_index >= model.pyroscope_profile_types.len() {
+                model.pyroscope_profile_type_index = 0;
+            }
             model.pyroscope_series_index = 0;
             render()
         }
@@ -56,7 +83,7 @@ pub fn handle_pyroscope_series_loaded(
 }
 
 pub fn handle_pyroscope_series_next(model: &mut Model) -> Command<Effect, Event> {
-    let count = model.pyroscope_series.len();
+    let count = filtered_pyroscope_series_indices(model).len();
     if count > 0 {
         model.pyroscope_series_index = (model.pyroscope_series_index + 1) % count;
     }
@@ -64,7 +91,7 @@ pub fn handle_pyroscope_series_next(model: &mut Model) -> Command<Effect, Event>
 }
 
 pub fn handle_pyroscope_series_prev(model: &mut Model) -> Command<Effect, Event> {
-    let count = model.pyroscope_series.len();
+    let count = filtered_pyroscope_series_indices(model).len();
     if count > 0 {
         model.pyroscope_series_index = (model.pyroscope_series_index + count - 1) % count;
     }
@@ -98,10 +125,49 @@ pub fn handle_pyroscope_time_range_abort(model: &mut Model) -> Command<Effect, E
     render()
 }
 
+pub fn handle_pyroscope_profile_type_next(model: &mut Model) -> Command<Effect, Event> {
+    let len = model.pyroscope_profile_types.len();
+    if len > 0 {
+        model.pyroscope_profile_type_index = (model.pyroscope_profile_type_index + 1) % len;
+        model.pyroscope_series_index = 0;
+    }
+    render()
+}
+
+pub fn handle_pyroscope_profile_type_prev(model: &mut Model) -> Command<Effect, Event> {
+    let len = model.pyroscope_profile_types.len();
+    if len > 0 {
+        model.pyroscope_profile_type_index =
+            (model.pyroscope_profile_type_index + len - 1) % len;
+        model.pyroscope_series_index = 0;
+    }
+    render()
+}
+
+pub fn handle_pyroscope_service_filter_input(model: &mut Model, c: char) -> Command<Effect, Event> {
+    model.pyroscope_service_filter.push(c);
+    model.pyroscope_series_index = 0;
+    render()
+}
+
+pub fn handle_pyroscope_service_filter_backspace(model: &mut Model) -> Command<Effect, Event> {
+    model.pyroscope_service_filter.pop();
+    model.pyroscope_series_index = 0;
+    render()
+}
+
+pub fn handle_pyroscope_service_filter_clear(model: &mut Model) -> Command<Effect, Event> {
+    model.pyroscope_service_filter.clear();
+    model.pyroscope_series_index = 0;
+    render()
+}
+
 pub fn handle_pyroscope_select_series(model: &mut Model) -> Command<Effect, Event> {
-    let Some(item) = model.pyroscope_series.get(model.pyroscope_series_index) else {
+    let indices = filtered_pyroscope_series_indices(model);
+    let Some(&abs_idx) = indices.get(model.pyroscope_series_index) else {
         return render();
     };
+    let item = &model.pyroscope_series[abs_idx];
     model.pyroscope_selected_service = item.service_name.clone();
     model.pyroscope_selected_profile_type = item.profile_type_id.clone();
     model.pyroscope_sub_screen = PyroscopeSubScreen::Flamegraph;
@@ -119,7 +185,10 @@ pub fn handle_pyroscope_flamegraph_loaded(
     match result {
         Ok(flamegraph) => {
             model.pyroscope_flamegraph_loading = false;
-            model.pyroscope_flamegraph = flamegraph;
+            model.pyroscope_flamegraph = flamegraph.map(|mut fg| {
+                fg.normalize_deltas();
+                fg
+            });
             model.flamegraph_nav = FlamegraphNav::default();
             render()
         }
@@ -178,5 +247,13 @@ pub fn handle_flame_zoom_in(model: &mut Model) -> Command<Effect, Event> {
 
 pub fn handle_flame_zoom_out(model: &mut Model) -> Command<Effect, Event> {
     model.flamegraph_nav.zoom_out();
+    render()
+}
+
+pub fn handle_flamegraph_viewport_chars(
+    model: &mut Model,
+    chars: u64,
+) -> Command<Effect, Event> {
+    model.flamegraph_nav.viewport_chars = chars;
     render()
 }
