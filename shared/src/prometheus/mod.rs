@@ -1,3 +1,4 @@
+pub mod app;
 pub mod context;
 pub mod keywords;
 pub mod types;

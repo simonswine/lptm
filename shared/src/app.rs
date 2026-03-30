@@ -8,13 +8,10 @@ use crux_core::{
 use crux_http::{command::Http, protocol::HttpRequest};
 use serde::{Deserialize, Serialize};
 
-use crate::prometheus::{
-    context::{char_to_byte, compute_completions, detect_context, word_boundary_byte},
-    types::{
-        PrometheusData, PrometheusResponse, PrometheusStringListResponse, PrometheusVectorItem,
-    },
-    CompletionCtx,
+use crate::prometheus::types::{
+    PrometheusResponse, PrometheusStringListResponse, PrometheusVectorItem,
 };
+use crate::pyroscope::{build_flamegraph_view, FlameGraph, FlamegraphNav, FlamegraphView};
 
 #[effect]
 pub enum Effect {
@@ -35,6 +32,12 @@ pub struct Datasource {
     #[serde(rename = "isDefault")]
     pub is_default: bool,
     pub access: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PyroscopeSeriesItem {
+    pub service_name: String,
+    pub profile_type_id: String,
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────
@@ -89,6 +92,32 @@ pub enum Event {
 
     // History navigation (fired by the TUI's Up/Down keys when no completions)
     HistoryNavigate(String),
+
+    // Pyroscope mode
+    EnterPyroscope { now_unix_ms: i64 },
+
+    PyroscopeSeriesNext,
+    PyroscopeSeriesPrev,
+    PyroscopeSeriesLoaded(Result<Vec<(String, String)>, String>),
+
+    PyroscopeTimeRangeEdit,
+    PyroscopeTimeRangeInput(char),
+    PyroscopeTimeRangeBackspace,
+    PyroscopeTimeRangeCommit { now_unix_ms: i64 },
+    PyroscopeTimeRangeAbort,
+
+    PyroscopeSelectSeries { now_unix_ms: i64 },
+    PyroscopeFlamegraphLoaded(Result<Option<FlameGraph>, String>),
+
+    BackToServiceList,
+    BackFromPyroscope,
+
+    FlameMoveLeft,
+    FlameMoveRight,
+    FlameMoveUp,
+    FlameMoveDown,
+    FlameZoomIn,
+    FlameZoomOut,
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -98,6 +127,7 @@ pub enum Screen {
     #[default]
     DatasourceList,
     QueryMode,
+    PyroscopeMode,
 }
 
 impl std::fmt::Debug for Screen {
@@ -105,8 +135,16 @@ impl std::fmt::Debug for Screen {
         match self {
             Screen::DatasourceList => write!(f, "DatasourceList"),
             Screen::QueryMode => write!(f, "QueryMode"),
+            Screen::PyroscopeMode => write!(f, "PyroscopeMode"),
         }
     }
+}
+
+#[derive(Default, Debug, PartialEq)]
+pub enum PyroscopeSubScreen {
+    #[default]
+    ServiceList,
+    Flamegraph,
 }
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -131,7 +169,7 @@ pub struct Model {
 
     // Autocomplete caches
     pub metric_names: Vec<String>,
-    pub label_names_cache: HashMap<String, Vec<String>>, // key = selector ("" = unfiltered)
+    pub label_names_cache: HashMap<String, Vec<String>>,
     pub label_values_cache: HashMap<(String, String), Vec<String>>,
 
     // Autocomplete UI state
@@ -139,12 +177,28 @@ pub struct Model {
     pub completion_dismissed: bool,
     pub metric_names_loading: bool,
     pub label_names_loading: bool,
+
+    // Pyroscope state
+    pub pyroscope_sub_screen: PyroscopeSubScreen,
+    pub pyroscope_time_range: String,
+    pub pyroscope_time_range_editing: bool,
+    pub pyroscope_series_loading: bool,
+    pub pyroscope_series_error: Option<String>,
+    pub pyroscope_series: Vec<PyroscopeSeriesItem>,
+    pub pyroscope_series_index: usize,
+    pub pyroscope_selected_service: String,
+    pub pyroscope_selected_profile_type: String,
+    pub pyroscope_flamegraph_loading: bool,
+    pub pyroscope_flamegraph_error: Option<String>,
+    pub pyroscope_flamegraph: Option<FlameGraph>,
+    pub flamegraph_nav: FlamegraphNav,
 }
 
 // ── ViewModel types ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DatasourceView {
+    pub id: u64,
     pub name: String,
     pub ds_type: String,
     pub url: String,
@@ -156,6 +210,14 @@ pub enum ScreenView {
     #[default]
     DatasourceList,
     QueryMode,
+    PyroscopeMode,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
+pub enum PyroscopeSubScreenView {
+    #[default]
+    ServiceList,
+    Flamegraph,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -184,6 +246,20 @@ pub struct ViewModel {
     pub completions: Vec<String>,
     pub completion_index: Option<usize>,
     pub completions_loading: bool,
+
+    // Pyroscope
+    pub pyroscope_sub_screen: PyroscopeSubScreenView,
+    pub pyroscope_time_range: String,
+    pub pyroscope_time_range_editing: bool,
+    pub pyroscope_series_loading: bool,
+    pub pyroscope_series_error: Option<String>,
+    pub pyroscope_series: Vec<(String, String)>, // (service_name, profile_type_id)
+    pub pyroscope_series_index: usize,
+    pub pyroscope_selected_service: String,
+    pub pyroscope_selected_profile_type: String,
+    pub pyroscope_flamegraph_loading: bool,
+    pub pyroscope_flamegraph_error: Option<String>,
+    pub flamegraph: Option<FlamegraphView>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -229,8 +305,14 @@ impl App for ExploreTui {
             Event::DatasourcesLoaded(Ok(mut response)) => {
                 model.loading = false;
                 let all = response.take_body().unwrap_or_default();
-                model.datasources =
-                    all.into_iter().filter(|ds| ds.ds_type == "prometheus").collect();
+                model.datasources = all
+                    .into_iter()
+                    .filter(|ds| {
+                        ds.ds_type == "prometheus"
+                            || ds.ds_type == "grafana-pyroscope-datasource"
+                            || ds.ds_type == "phlare"
+                    })
+                    .collect();
                 model.datasource_filter.clear();
                 model.selected_index = 0;
                 render()
@@ -283,291 +365,80 @@ impl App for ExploreTui {
                 render()
             }
 
-            Event::EnterQuery => {
-                // Resolve the filtered-list index to an absolute datasource index,
-                // then clear the filter so QueryMode always sees the full list.
-                let indices = filtered_datasource_indices(model);
-                if indices.is_empty() {
-                    return render();
-                }
-                let abs_idx = indices[model.selected_index.min(indices.len() - 1)];
-                model.selected_index = abs_idx;
-                model.datasource_filter.clear();
+            // ── Prometheus ────────────────────────────────────────────────────
 
-                model.screen = Screen::QueryMode;
-                model.query.clear();
-                model.cursor_pos = 0;
-                model.query_results = None;
-                model.query_error = None;
-                model.completion_dismissed = false;
-                model.completion_index = None;
-
-                // Clear caches and start fresh for the selected datasource.
-                model.metric_names.clear();
-                model.label_names_cache.clear();
-                model.label_values_cache.clear();
-
-                if model.datasources.is_empty() {
-                    return render();
-                }
-
-                let ds = &model.datasources[model.selected_index];
-                let base = format!(
-                    "{}/api/datasources/proxy/{}",
-                    model.grafana_url, ds.id
-                );
-                let token = model.grafana_token.clone();
-
-                model.metric_names_loading = true;
-                model.label_names_loading = true;
-
-                Command::all([
-                    render(),
-                    Http::<Effect, Event>::get(format!(
-                        "{base}/api/v1/label/__name__/values"
-                    ))
-                    .header("Authorization", format!("Bearer {token}"))
-                    .expect_json::<PrometheusStringListResponse>()
-                    .build()
-                    .then_send(Event::MetricNamesLoaded),
-                    Http::<Effect, Event>::get(format!("{base}/api/v1/labels"))
-                        .header("Authorization", format!("Bearer {token}"))
-                        .expect_json::<PrometheusStringListResponse>()
-                        .build()
-                        .then_send(|r| Event::LabelNamesLoaded(String::new(), r)),
-                ])
+            Event::EnterQuery => crate::prometheus::app::handle_enter_query(model),
+            Event::QueryInput(c) => crate::prometheus::app::handle_query_input(model, c),
+            Event::QueryBackspace => crate::prometheus::app::handle_query_backspace(model),
+            Event::QueryDelete => crate::prometheus::app::handle_query_delete(model),
+            Event::TriggerCompletions => crate::prometheus::app::handle_trigger_completions(model),
+            Event::CursorLeft => crate::prometheus::app::handle_cursor_left(model),
+            Event::CursorRight => crate::prometheus::app::handle_cursor_right(model),
+            Event::CursorHome => crate::prometheus::app::handle_cursor_home(model),
+            Event::CursorEnd => crate::prometheus::app::handle_cursor_end(model),
+            Event::MetricNamesLoaded(resp) => {
+                crate::prometheus::app::handle_metric_names_loaded(model, resp)
             }
-
-            // ── Query text editing ────────────────────────────────────────────
-
-            Event::QueryInput(c) => {
-                let byte_pos = char_to_byte(&model.query, model.cursor_pos);
-                model.query.insert(byte_pos, c);
-                model.cursor_pos += 1;
-                model.completion_dismissed = false;
-                model.completion_index = None;
-                render()
+            Event::LabelNamesLoaded(sel, resp) => {
+                crate::prometheus::app::handle_label_names_loaded(model, sel, resp)
             }
-
-            Event::QueryBackspace => {
-                if model.cursor_pos > 0 {
-                    let byte_pos = char_to_byte(&model.query, model.cursor_pos - 1);
-                    model.query.remove(byte_pos);
-                    model.cursor_pos -= 1;
-                }
-                model.completion_dismissed = false;
-                model.completion_index = None;
-                render()
+            Event::LabelValuesLoaded(lbl, sel, resp) => {
+                crate::prometheus::app::handle_label_values_loaded(model, lbl, sel, resp)
             }
-
-            // Fired by the TUI's debounce timer after a pause in typing.
-            Event::TriggerCompletions => render_with_completion_cmds(model),
-
-            Event::QueryDelete => {
-                let char_count = model.query.chars().count();
-                if model.cursor_pos < char_count {
-                    let byte_pos = char_to_byte(&model.query, model.cursor_pos);
-                    model.query.remove(byte_pos);
-                }
-                model.completion_dismissed = false;
-                model.completion_index = None;
-                render()
+            Event::CompletionNext => crate::prometheus::app::handle_completion_next(model),
+            Event::CompletionPrev => crate::prometheus::app::handle_completion_prev(model),
+            Event::CompletionAccept => crate::prometheus::app::handle_completion_accept(model),
+            Event::CompletionDismiss => crate::prometheus::app::handle_completion_dismiss(model),
+            Event::ExecuteQuery => crate::prometheus::app::handle_execute_query(model),
+            Event::QueryResultLoaded(resp) => {
+                crate::prometheus::app::handle_query_result_loaded(model, resp)
             }
-
-            Event::CursorLeft => {
-                if model.cursor_pos > 0 {
-                    model.cursor_pos -= 1;
-                }
-                render()
-            }
-
-            Event::CursorRight => {
-                if model.cursor_pos < model.query.chars().count() {
-                    model.cursor_pos += 1;
-                }
-                render()
-            }
-
-            Event::CursorHome => {
-                model.cursor_pos = 0;
-                render()
-            }
-
-            Event::CursorEnd => {
-                model.cursor_pos = model.query.chars().count();
-                render()
-            }
-
-            // ── Autocomplete ──────────────────────────────────────────────────
-
-            Event::MetricNamesLoaded(Ok(mut response)) => {
-                model.metric_names_loading = false;
-                model.metric_names =
-                    response.take_body().map(|r| r.data).unwrap_or_default();
-                model.metric_names.sort();
-                render()
-            }
-
-            Event::MetricNamesLoaded(Err(_)) => {
-                model.metric_names_loading = false;
-                render()
-            }
-
-            Event::LabelNamesLoaded(selector, Ok(mut response)) => {
-                if selector.is_empty() {
-                    model.label_names_loading = false;
-                }
-                let mut names = response.take_body().map(|r| r.data).unwrap_or_default();
-                names.sort();
-                model.label_names_cache.insert(selector, names);
-                render()
-            }
-
-            Event::LabelNamesLoaded(selector, Err(_)) => {
-                if selector.is_empty() {
-                    model.label_names_loading = false;
-                }
-                // Insert empty entry so we don't retry on every keystroke.
-                model.label_names_cache.entry(selector).or_default();
-                render()
-            }
-
-            Event::LabelValuesLoaded(label, selector, Ok(mut response)) => {
-                let values = response.take_body().map(|r| r.data).unwrap_or_default();
-                model.label_values_cache.insert((label, selector), values);
-                render()
-            }
-
-            Event::LabelValuesLoaded(label, selector, Err(_)) => {
-                // Insert empty entry so we don't retry on every keystroke.
-                model.label_values_cache.entry((label, selector)).or_default();
-                render()
-            }
-
-            Event::CompletionNext => {
-                let completions = get_completions(model);
-                if !completions.is_empty() {
-                    model.completion_dismissed = false;
-                    model.completion_index = Some(match model.completion_index {
-                        None => 0,
-                        Some(i) => (i + 1) % completions.len(),
-                    });
-                }
-                render()
-            }
-
-            Event::CompletionPrev => {
-                let completions = get_completions(model);
-                if !completions.is_empty() {
-                    model.completion_dismissed = false;
-                    let len = completions.len();
-                    model.completion_index = Some(match model.completion_index {
-                        None => len - 1,
-                        Some(0) => len - 1,
-                        Some(i) => i - 1,
-                    });
-                }
-                render()
-            }
-
-            Event::CompletionAccept => {
-                let completions = get_completions(model);
-                // If nothing is selected, pick the first entry.
-                let idx = model
-                    .completion_index
-                    .or(if completions.is_empty() { None } else { Some(0) });
-
-                if let Some(i) = idx {
-                    if let Some(completion) = completions.get(i) {
-                        let completion = completion.clone();
-                        let cursor_byte = char_to_byte(&model.query, model.cursor_pos);
-                        let before = &model.query[..cursor_byte];
-                        let word_start = word_boundary_byte(before);
-                        let word_start_char = model.query[..word_start].chars().count();
-
-                        let mut new_query = model.query[..word_start].to_string();
-                        new_query.push_str(&completion);
-                        new_query.push_str(&model.query[cursor_byte..]);
-
-                        model.cursor_pos = word_start_char + completion.chars().count();
-                        model.query = new_query;
-                    }
-                }
-
-                model.completion_index = None;
-                model.completion_dismissed = false;
-                // Recompute to show next-level completions (e.g. after accepting a
-                // function name the user may want label completions inside {}).
-                render_with_completion_cmds(model)
-            }
-
-            Event::CompletionDismiss => {
-                model.completion_dismissed = true;
-                model.completion_index = None;
-                render()
-            }
-
-            // ── Query execution ───────────────────────────────────────────────
-
-            Event::ExecuteQuery => {
-                if model.datasources.is_empty() {
-                    return render();
-                }
-                model.query_loading = true;
-                model.query_error = None;
-                model.query_results = None;
-                model.completion_dismissed = true;
-                model.completion_index = None;
-
-                let ds = &model.datasources[model.selected_index];
-                let url = format!(
-                    "{}/api/datasources/proxy/{}/api/v1/query?query={}",
-                    model.grafana_url,
-                    ds.id,
-                    percent_encode(&model.query)
-                );
-                let token = model.grafana_token.clone();
-                Command::all([
-                    render(),
-                    Http::<Effect, Event>::get(url)
-                        .header("Authorization", format!("Bearer {token}"))
-                        .expect_json::<PrometheusResponse>()
-                        .build()
-                        .then_send(Event::QueryResultLoaded),
-                ])
-            }
-
-            Event::QueryResultLoaded(Ok(mut response)) => {
-                model.query_loading = false;
-                let prom = response.take_body().unwrap_or(PrometheusResponse {
-                    status: "error".into(),
-                    data: PrometheusData {
-                        result_type: "vector".into(),
-                        result: vec![],
-                    },
-                });
-                model.query_results = Some(prom.data.result);
-                render()
-            }
-
-            Event::QueryResultLoaded(Err(err)) => {
-                model.query_loading = false;
-                model.query_error = Some(extract_error_message(&err));
-                render()
-            }
-
-            Event::BackToDatasources => {
-                model.screen = Screen::DatasourceList;
-                render()
-            }
-
+            Event::BackToDatasources => crate::prometheus::app::handle_back_to_datasources(model),
             Event::HistoryNavigate(query) => {
-                model.cursor_pos = query.chars().count();
-                model.query = query;
-                model.completion_dismissed = true;
-                model.completion_index = None;
-                render()
+                crate::prometheus::app::handle_history_navigate(model, query)
             }
+
+            // ── Pyroscope ─────────────────────────────────────────────────────
+
+            Event::EnterPyroscope { .. } => crate::pyroscope::app::handle_enter_pyroscope(model),
+            Event::PyroscopeSeriesLoaded(result) => {
+                crate::pyroscope::app::handle_pyroscope_series_loaded(model, result)
+            }
+            Event::PyroscopeSeriesNext => {
+                crate::pyroscope::app::handle_pyroscope_series_next(model)
+            }
+            Event::PyroscopeSeriesPrev => {
+                crate::pyroscope::app::handle_pyroscope_series_prev(model)
+            }
+            Event::PyroscopeTimeRangeEdit => {
+                crate::pyroscope::app::handle_pyroscope_time_range_edit(model)
+            }
+            Event::PyroscopeTimeRangeInput(c) => {
+                crate::pyroscope::app::handle_pyroscope_time_range_input(model, c)
+            }
+            Event::PyroscopeTimeRangeBackspace => {
+                crate::pyroscope::app::handle_pyroscope_time_range_backspace(model)
+            }
+            Event::PyroscopeTimeRangeCommit { .. } => {
+                crate::pyroscope::app::handle_pyroscope_time_range_commit(model)
+            }
+            Event::PyroscopeTimeRangeAbort => {
+                crate::pyroscope::app::handle_pyroscope_time_range_abort(model)
+            }
+            Event::PyroscopeSelectSeries { .. } => {
+                crate::pyroscope::app::handle_pyroscope_select_series(model)
+            }
+            Event::PyroscopeFlamegraphLoaded(result) => {
+                crate::pyroscope::app::handle_pyroscope_flamegraph_loaded(model, result)
+            }
+            Event::BackToServiceList => crate::pyroscope::app::handle_back_to_service_list(model),
+            Event::BackFromPyroscope => crate::pyroscope::app::handle_back_from_pyroscope(model),
+            Event::FlameMoveLeft => crate::pyroscope::app::handle_flame_move_left(model),
+            Event::FlameMoveRight => crate::pyroscope::app::handle_flame_move_right(model),
+            Event::FlameMoveUp => crate::pyroscope::app::handle_flame_move_up(model),
+            Event::FlameMoveDown => crate::pyroscope::app::handle_flame_move_down(model),
+            Event::FlameZoomIn => crate::pyroscope::app::handle_flame_zoom_in(model),
+            Event::FlameZoomOut => crate::pyroscope::app::handle_flame_zoom_out(model),
         }
     }
 
@@ -575,10 +446,9 @@ impl App for ExploreTui {
         let screen = match model.screen {
             Screen::DatasourceList => ScreenView::DatasourceList,
             Screen::QueryMode => ScreenView::QueryMode,
+            Screen::PyroscopeMode => ScreenView::PyroscopeMode,
         };
 
-        // In DatasourceList mode the indices list reflects the active filter;
-        // in QueryMode the filter has already been cleared so this is 0..len.
         let indices = filtered_datasource_indices(model);
         let selected_index = if indices.is_empty() {
             0
@@ -591,8 +461,9 @@ impl App for ExploreTui {
             .map(|&i| {
                 let ds = &model.datasources[i];
                 DatasourceView {
+                    id: ds.id,
                     name: ds.name.clone(),
-                    ds_type: ds.ds_type.clone(),
+                    ds_type: normalize_ds_type(&ds.ds_type).to_string(),
                     url: ds.url.clone(),
                     is_default: ds.is_default,
                 }
@@ -609,8 +480,24 @@ impl App for ExploreTui {
             .as_ref()
             .map(|results| build_query_results_view(results));
 
-        let completions = get_completions(model);
+        let completions = crate::prometheus::app::get_completions(model);
         let completions_loading = model.metric_names_loading || model.label_names_loading;
+
+        let flamegraph = model
+            .pyroscope_flamegraph
+            .as_ref()
+            .map(|fg| build_flamegraph_view(fg, &model.flamegraph_nav));
+
+        let pyroscope_sub_screen = match model.pyroscope_sub_screen {
+            PyroscopeSubScreen::ServiceList => PyroscopeSubScreenView::ServiceList,
+            PyroscopeSubScreen::Flamegraph => PyroscopeSubScreenView::Flamegraph,
+        };
+
+        let pyroscope_series: Vec<(String, String)> = model
+            .pyroscope_series
+            .iter()
+            .map(|item| (item.service_name.clone(), item.profile_type_id.clone()))
+            .collect();
 
         ViewModel {
             datasource_filter: model.datasource_filter.clone(),
@@ -628,13 +515,33 @@ impl App for ExploreTui {
             completions,
             completion_index: model.completion_index,
             completions_loading,
+            pyroscope_sub_screen,
+            pyroscope_time_range: model.pyroscope_time_range.clone(),
+            pyroscope_time_range_editing: model.pyroscope_time_range_editing,
+            pyroscope_series_loading: model.pyroscope_series_loading,
+            pyroscope_series_error: model.pyroscope_series_error.clone(),
+            pyroscope_series,
+            pyroscope_series_index: model.pyroscope_series_index,
+            pyroscope_selected_service: model.pyroscope_selected_service.clone(),
+            pyroscope_selected_profile_type: model.pyroscope_selected_profile_type.clone(),
+            pyroscope_flamegraph_loading: model.pyroscope_flamegraph_loading,
+            pyroscope_flamegraph_error: model.pyroscope_flamegraph_error.clone(),
+            flamegraph,
         }
+    }
+}
+
+// ── Datasource type helpers ───────────────────────────────────────────────────
+
+fn normalize_ds_type(ds_type: &str) -> &str {
+    match ds_type {
+        "grafana-pyroscope-datasource" | "phlare" => "pyroscope",
+        other => other,
     }
 }
 
 // ── Datasource filter helpers ─────────────────────────────────────────────────
 
-/// All characters of `needle` must appear in `haystack` in order (case-insensitive).
 fn fuzzy_match(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
@@ -652,8 +559,7 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
     true
 }
 
-/// Indices into `model.datasources` that survive the current filter.
-fn filtered_datasource_indices(model: &Model) -> Vec<usize> {
+pub(crate) fn filtered_datasource_indices(model: &Model) -> Vec<usize> {
     if model.datasource_filter.is_empty() {
         return (0..model.datasources.len()).collect();
     }
@@ -666,134 +572,18 @@ fn filtered_datasource_indices(model: &Model) -> Vec<usize> {
         .collect()
 }
 
-// ── Completion helpers ────────────────────────────────────────────────────────
-
-/// Compute filtered completions for the current query / cursor state.
-/// Returns at most `MAX_COMPLETIONS` entries.
-fn get_completions(model: &Model) -> Vec<String> {
-    const MAX_COMPLETIONS: usize = 10;
-
-    if model.screen != Screen::QueryMode || model.completion_dismissed {
-        return vec![];
-    }
-
-    let ctx = detect_context(&model.query, model.cursor_pos);
-    compute_completions(
-        &ctx,
-        &model.metric_names,
-        &model.label_names_cache,
-        &model.label_values_cache,
-        MAX_COMPLETIONS,
-    )
-}
-
-/// If the cursor is inside `{…}` with a non-empty selector and label names for
-/// that selector aren't cached yet, return an HTTP command to fetch them.
-fn maybe_label_names_cmd(model: &Model) -> Option<Command<Effect, Event>> {
-    let ds_id = model.datasources.get(model.selected_index)?.id;
-    let ctx = detect_context(&model.query, model.cursor_pos);
-
-    if let CompletionCtx::LabelName { ref selector, .. } = ctx {
-        if selector.is_empty() {
-            return None; // initial unfiltered fetch is handled by EnterQuery
-        }
-        if !model.label_names_cache.contains_key(selector.as_str()) {
-            let url = format!(
-                "{}/api/datasources/proxy/{}/api/v1/labels?match[]={}",
-                model.grafana_url,
-                ds_id,
-                percent_encode(selector)
-            );
-            let token = model.grafana_token.clone();
-            let selector_clone = selector.clone();
-            return Some(
-                Http::<Effect, Event>::get(url)
-                    .header("Authorization", format!("Bearer {token}"))
-                    .expect_json::<PrometheusStringListResponse>()
-                    .build()
-                    .then_send(move |r| Event::LabelNamesLoaded(selector_clone.clone(), r)),
-            );
-        }
-    }
-
-    None
-}
-
-/// Render the current frame and fire any label-name / label-value HTTP fetches
-/// required by the current cursor context.
-fn render_with_completion_cmds(model: &Model) -> Command<Effect, Event> {
-    let extra: Vec<_> = [maybe_label_names_cmd(model), maybe_label_values_cmd(model)]
-        .into_iter()
-        .flatten()
-        .collect();
-    if extra.is_empty() {
-        render()
-    } else {
-        Command::all(std::iter::once(render()).chain(extra))
-    }
-}
-
-/// If the current context is a label-value context and the label's values are
-/// not yet cached, return an HTTP command to fetch them.
-fn maybe_label_values_cmd(model: &Model) -> Option<Command<Effect, Event>> {
-    let ds_id = model.datasources.get(model.selected_index)?.id;
-    let ctx = detect_context(&model.query, model.cursor_pos);
-
-    if let CompletionCtx::LabelValue { ref label, ref selector, .. } = ctx {
-        let cache_key = (label.clone(), selector.clone());
-        if !model.label_values_cache.contains_key(&cache_key) {
-            let base = format!(
-                "{}/api/datasources/proxy/{}/api/v1/label/{}/values",
-                model.grafana_url,
-                ds_id,
-                percent_encode(label)
-            );
-            // Pass existing matchers as a series selector so Prometheus scopes
-            // the returned values to the already-constrained series.
-            let url = if selector.is_empty() {
-                base
-            } else {
-                format!("{}?match[]={}", base, percent_encode(selector))
-            };
-            let token = model.grafana_token.clone();
-            let label_clone = label.clone();
-            let selector_clone = selector.clone();
-            return Some(
-                Http::<Effect, Event>::get(url)
-                    .header("Authorization", format!("Bearer {token}"))
-                    .expect_json::<PrometheusStringListResponse>()
-                    .build()
-                    .then_send(move |r| {
-                        Event::LabelValuesLoaded(label_clone.clone(), selector_clone.clone(), r)
-                    }),
-            );
-        }
-    }
-
-    None
-}
-
 // ── Utility helpers ───────────────────────────────────────────────────────────
 
-/// Extract a human-readable error message from an `HttpError`.
-///
-/// For `HttpError::Http` errors the raw response body is available.  Prometheus
-/// and Grafana both return JSON bodies with an `"error"` or `"message"` key on
-/// 4xx/5xx responses, so we try to parse that out.  If parsing fails we fall
-/// back to the HTTP status text.
-fn extract_error_message(err: &crux_http::HttpError) -> String {
+pub(crate) fn extract_error_message(err: &crux_http::HttpError) -> String {
     if let crux_http::HttpError::Http { body: Some(body), .. } = err {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
-            // Prometheus: {"status":"error","errorType":"...","error":"..."}
             if let Some(msg) = json.get("error").and_then(|v| v.as_str()) {
                 return msg.to_string();
             }
-            // Grafana admin errors: {"message":"..."}
             if let Some(msg) = json.get("message").and_then(|v| v.as_str()) {
                 return msg.to_string();
             }
         }
-        // Plain-text body fallback
         if let Ok(text) = std::str::from_utf8(body) {
             let text = text.trim();
             if !text.is_empty() {
@@ -802,31 +592,6 @@ fn extract_error_message(err: &crux_http::HttpError) -> String {
         }
     }
     err.to_string()
-}
-
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            b => {
-                out.push('%');
-                out.push(
-                    char::from_digit((b >> 4) as u32, 16)
-                        .unwrap()
-                        .to_ascii_uppercase(),
-                );
-                out.push(
-                    char::from_digit((b & 0xf) as u32, 16)
-                        .unwrap()
-                        .to_ascii_uppercase(),
-                );
-            }
-        }
-    }
-    out
 }
 
 fn build_query_results_view(results: &[PrometheusVectorItem]) -> QueryResultsView {
@@ -864,7 +629,9 @@ mod tests {
     use crux_core::Core;
     use crux_http::testing::ResponseBuilder;
 
+    use crate::prometheus::app::percent_encode;
     use crate::prometheus::types::{PrometheusStringListResponse, PrometheusVectorItem};
+    use crate::pyroscope::{FlameGraph, Level};
 
     fn make_core() -> Core<ExploreTui> {
         Core::new()
@@ -900,6 +667,29 @@ mod tests {
                 access: "proxy".into(),
             },
         ]
+    }
+
+    fn make_datasources_with_pyroscope() -> Vec<Datasource> {
+        let mut ds = make_datasources();
+        ds.push(Datasource {
+            id: 4,
+            uid: "uid4".into(),
+            name: "Pyroscope".into(),
+            ds_type: "grafana-pyroscope-datasource".into(),
+            url: "http://pyroscope:4040".into(),
+            is_default: false,
+            access: "proxy".into(),
+        });
+        ds.push(Datasource {
+            id: 5,
+            uid: "uid5".into(),
+            name: "Phlare".into(),
+            ds_type: "phlare".into(),
+            url: "http://phlare:4100".into(),
+            is_default: false,
+            access: "proxy".into(),
+        });
+        ds
     }
 
     #[test]
@@ -961,8 +751,79 @@ mod tests {
         let response = ResponseBuilder::ok().body(make_datasources()).build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
         let vm = core.view();
-        assert!(vm.datasources.iter().all(|ds| ds.ds_type == "prometheus"));
+        assert!(vm.datasources.iter().all(|ds| {
+            ds.ds_type == "prometheus" || ds.ds_type == "pyroscope"
+        }));
         assert!(vm.datasources.iter().all(|ds| ds.name != "Loki"));
+    }
+
+    #[test]
+    fn pyroscope_filter_includes_pyroscope_datasources() {
+        let core = make_core();
+        let response =
+            ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        core.process_event(Event::DatasourcesLoaded(Ok(response)));
+        let vm = core.view();
+        assert!(vm
+            .datasources
+            .iter()
+            .any(|ds| ds.ds_type == "pyroscope"));
+    }
+
+    #[test]
+    fn enter_pyroscope_series_loaded() {
+        let core = make_core();
+        core.process_event(Event::Configure {
+            url: "http://localhost:3000".into(),
+            token: "test-token".into(),
+        });
+        let response =
+            ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        core.process_event(Event::DatasourcesLoaded(Ok(response)));
+
+        // Select the pyroscope datasource (index 2 after filtering: Prometheus, Prometheus2, Pyroscope)
+        core.process_event(Event::SelectNext);
+        core.process_event(Event::SelectNext);
+
+        core.process_event(Event::EnterPyroscope { now_unix_ms: 1_000_000 });
+        assert_eq!(core.view().screen, ScreenView::PyroscopeMode);
+
+        let series = vec![
+            ("svc-a".into(), "cpu:cpu:nanoseconds:cpu:nanoseconds".into()),
+            ("svc-a".into(), "memory:alloc_objects:count:space:bytes".into()),
+        ];
+        core.process_event(Event::PyroscopeSeriesLoaded(Ok(series)));
+
+        let vm = core.view();
+        assert_eq!(vm.pyroscope_series.len(), 2);
+    }
+
+    #[test]
+    fn build_flamegraph_view_basic() {
+        use crate::pyroscope::{build_flamegraph_view, FlamegraphNav};
+
+        let fg = FlameGraph {
+            names: vec!["total".into(), "func_a".into(), "func_b".into()],
+            levels: vec![
+                Level { values: vec![0, 100, 0, 0] },
+                Level { values: vec![0, 60, 10, 1, 60, 40, 5, 2] },
+            ],
+            total: 100,
+            max_self: 10,
+        };
+        let nav = FlamegraphNav::default();
+        let view = build_flamegraph_view(&fg, &nav);
+
+        assert_eq!(view.root_samples, 100);
+        assert_eq!(view.levels.len(), 2);
+        // Root level has 1 visible frame (the total frame)
+        assert_eq!(view.levels[0].frames.len(), 1);
+        assert_eq!(view.levels[0].frames[0].name, "total");
+        // Level 1 has 2 frames
+        assert_eq!(view.levels[1].frames.len(), 2);
+        // Selected frame is root level frame 0 (sel_level=0, sel_frame=0)
+        assert!(view.levels[0].frames[0].is_selected);
+        assert!((view.levels[0].frames[0].total_pct - 100.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1040,10 +901,10 @@ mod tests {
         core.process_event(Event::CursorEnd);
         assert_eq!(core.view().cursor_pos, 4);
         core.process_event(Event::CursorRight);
-        assert_eq!(core.view().cursor_pos, 4); // clamped
+        assert_eq!(core.view().cursor_pos, 4);
         core.process_event(Event::CursorHome);
         core.process_event(Event::CursorLeft);
-        assert_eq!(core.view().cursor_pos, 0); // clamped
+        assert_eq!(core.view().cursor_pos, 0);
     }
 
     #[test]
@@ -1053,11 +914,11 @@ mod tests {
         for c in ['a', 'b', 'c'] {
             core.process_event(Event::QueryInput(c));
         }
-        core.process_event(Event::QueryDelete); // at end, no-op
+        core.process_event(Event::QueryDelete);
         assert_eq!(core.view().query, "abc");
         core.process_event(Event::CursorHome);
         core.process_event(Event::CursorRight);
-        core.process_event(Event::QueryDelete); // delete 'b'
+        core.process_event(Event::QueryDelete);
         assert_eq!(core.view().query, "ac");
         assert_eq!(core.view().cursor_pos, 1);
     }
@@ -1069,12 +930,10 @@ mod tests {
             url: "http://localhost:3000".into(),
             token: "test-token".into(),
         });
-        // Inject datasources so EnterQuery can fire fetches
         let response = ResponseBuilder::ok().body(make_datasources()).build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
         core.process_event(Event::EnterQuery);
 
-        // Simulate metric names loaded so completions are available
         let names_resp = ResponseBuilder::ok()
             .body(PrometheusStringListResponse {
                 status: "success".into(),
@@ -1090,18 +949,14 @@ mod tests {
             .build();
         core.process_event(Event::LabelNamesLoaded(String::new(), Ok(labels_resp)));
 
-        // Type "ra"
         core.process_event(Event::QueryInput('r'));
         core.process_event(Event::QueryInput('a'));
         assert_eq!(core.view().query, "ra");
         assert!(!core.view().completions.is_empty(), "expected completions");
 
-        // Select second item with CompletionNext (first is a keyword like "rad")
-        // Just accept whatever is first
         core.process_event(Event::CompletionNext);
         core.process_event(Event::CompletionAccept);
 
-        // The word "ra" should have been replaced with the selected completion
         let vm = core.view();
         assert_ne!(vm.query, "ra", "query should be updated after accept");
         assert!(!vm.query.starts_with("ra") || vm.query.len() > 2);

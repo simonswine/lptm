@@ -1,6 +1,8 @@
 mod core;
 mod highlight;
 mod http;
+mod prometheus;
+mod pyroscope;
 
 use anyhow::Result;
 use clap::Parser;
@@ -14,12 +16,11 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table,
-        TableState,
+        Block, Borders, Cell, Paragraph, Row, Table, TableState,
     },
     DefaultTerminal, Frame,
 };
-use shared::{Event, QueryResultsView, ScreenView, ViewModel};
+use shared::{Event, PyroscopeSubScreenView, ScreenView, ViewModel};
 use tokio::{sync::mpsc, time::Instant};
 
 use crate::core::AppCore;
@@ -130,14 +131,20 @@ async fn main() -> Result<()> {
     result
 }
 
+enum PyroscopeMsg {
+    Series(Result<Vec<(String, String)>, String>),
+    Flamegraph(Result<Option<shared::pyroscope::FlameGraph>, String>),
+}
+
 async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
     let (render_tx, mut render_rx) = mpsc::unbounded_channel::<()>();
     let app_core = AppCore::new(render_tx);
 
-    // Compute the URL hash before args are moved.
     let url_hash = grafana_url_hash(&args.grafana_url);
 
-    // Bootstrap: configure and trigger initial fetch
+    let grafana_url = args.grafana_url.clone();
+    let grafana_token = args.grafana_token.clone();
+
     app_core.update(Event::Configure {
         url: args.grafana_url,
         token: args.grafana_token,
@@ -145,23 +152,28 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
 
     let mut reader = EventStream::new();
 
-    // All persisted history entries (full JSON records).
     let mut all_history = load_history();
-    // Filtered query strings for the currently selected datasource + Grafana URL.
-    // Populated when the user enters QueryMode; empty until then.
     let mut history: Vec<String> = vec![];
-    // None = live query; Some(i) = browsing history at index i.
     let mut history_pos: Option<usize> = None;
-    // The query the user had typed before entering history navigation.
     let mut history_saved_query = String::new();
 
-    // Completion debounce: fire TriggerCompletions after 250 ms of no typing.
     const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
     let mut debounce_deadline: Option<Instant> = None;
 
+    let (pyroscope_tx, mut pyroscope_rx) = mpsc::unbounded_channel::<PyroscopeMsg>();
+
     loop {
         tokio::select! {
-            // Debounce timer: fire completions after the user pauses typing.
+            Some(msg) = pyroscope_rx.recv() => {
+                match msg {
+                    PyroscopeMsg::Series(result) => {
+                        app_core.update(Event::PyroscopeSeriesLoaded(result));
+                    }
+                    PyroscopeMsg::Flamegraph(result) => {
+                        app_core.update(Event::PyroscopeFlamegraphLoaded(result));
+                    }
+                }
+            }
             () = async {
                 match debounce_deadline {
                     Some(d) => tokio::time::sleep_until(d).await,
@@ -199,22 +211,39 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         app_core.update(Event::DatasourceFilterBackspace);
                                     }
                                     (KeyCode::Enter, _) => {
-                                        history_pos = None;
-                                        // Rebuild the filtered history for the selected datasource.
                                         if let Some(ds) = vm.datasources.get(vm.selected_index) {
-                                            let ds_name = ds.name.clone();
-                                            let ds_type = ds.ds_type.clone();
-                                            history = all_history
-                                                .iter()
-                                                .filter(|e| {
-                                                    e.grafana_url_hash == url_hash
-                                                        && e.datasource_name == ds_name
-                                                        && e.datasource_type == ds_type
-                                                })
-                                                .map(|e| e.query.clone())
-                                                .collect();
+                                            if ds.ds_type == "pyroscope" {
+                                                let now = now_unix_secs() as i64 * 1000;
+                                                app_core.update(Event::EnterPyroscope { now_unix_ms: now });
+                                                // After the event the model has set pyroscope_time_range.
+                                                let vm2 = app_core.core.view();
+                                                spawn_series_fetch(
+                                                    &pyroscope_tx,
+                                                    grafana_url.clone(),
+                                                    ds.id,
+                                                    grafana_token.clone(),
+                                                    vm2.pyroscope_time_range.clone(),
+                                                    now,
+                                                );
+                                            } else {
+                                                history_pos = None;
+                                                let ds_name = ds.name.clone();
+                                                let ds_type = ds.ds_type.clone();
+                                                history = all_history
+                                                    .iter()
+                                                    .filter(|e| {
+                                                        e.grafana_url_hash == url_hash
+                                                            && e.datasource_name == ds_name
+                                                            && e.datasource_type == ds_type
+                                                    })
+                                                    .map(|e| e.query.clone())
+                                                    .collect();
+                                                app_core.update(Event::EnterQuery);
+                                            }
+                                        } else {
+                                            history_pos = None;
+                                            app_core.update(Event::EnterQuery);
                                         }
-                                        app_core.update(Event::EnterQuery);
                                     }
                                     (KeyCode::Char(c), _) => {
                                         app_core.update(Event::DatasourceFilterInput(c));
@@ -238,14 +267,12 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     (KeyCode::Tab, _) => {
                                         app_core.update(Event::CompletionAccept);
                                     }
-                                    // Completion navigation (only when popup is visible).
                                     (KeyCode::Down, _) if !vm.completions.is_empty() => {
                                         app_core.update(Event::CompletionNext);
                                     }
                                     (KeyCode::Up, _) if !vm.completions.is_empty() => {
                                         app_core.update(Event::CompletionPrev);
                                     }
-                                    // History navigation (only when popup is absent).
                                     (KeyCode::Up, _) => {
                                         if !history.is_empty() {
                                             let new_pos = match history_pos {
@@ -334,6 +361,110 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     _ => {}
                                 }
                             }
+                            ScreenView::PyroscopeMode => {
+                                match (key.code, key.modifiers) {
+                                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                                    _ => {}
+                                }
+                                match vm.pyroscope_sub_screen {
+                                    PyroscopeSubScreenView::ServiceList => {
+                                        if vm.pyroscope_time_range_editing {
+                                            match key.code {
+                                                KeyCode::Esc => {
+                                                    app_core.update(Event::PyroscopeTimeRangeAbort);
+                                                }
+                                                KeyCode::Enter => {
+                                                    let now = now_unix_secs() as i64 * 1000;
+                                                    app_core.update(Event::PyroscopeTimeRangeCommit { now_unix_ms: now });
+                                                    // After commit the model has the updated time range.
+                                                    if let Some(ds) = app_core.core.view().datasources.get(app_core.core.view().selected_index) {
+                                                        let vm2 = app_core.core.view();
+                                                        spawn_series_fetch(
+                                                            &pyroscope_tx,
+                                                            grafana_url.clone(),
+                                                            ds.id,
+                                                            grafana_token.clone(),
+                                                            vm2.pyroscope_time_range.clone(),
+                                                            now,
+                                                        );
+                                                    }
+                                                }
+                                                KeyCode::Backspace => {
+                                                    app_core.update(Event::PyroscopeTimeRangeBackspace);
+                                                }
+                                                KeyCode::Char(c) => {
+                                                    app_core.update(Event::PyroscopeTimeRangeInput(c));
+                                                }
+                                                _ => {}
+                                            }
+                                        } else {
+                                            match key.code {
+                                                KeyCode::Esc => {
+                                                    app_core.update(Event::BackFromPyroscope);
+                                                }
+                                                KeyCode::Char('j') | KeyCode::Down => {
+                                                    app_core.update(Event::PyroscopeSeriesNext);
+                                                }
+                                                KeyCode::Char('k') | KeyCode::Up => {
+                                                    app_core.update(Event::PyroscopeSeriesPrev);
+                                                }
+                                                KeyCode::Char('t') => {
+                                                    app_core.update(Event::PyroscopeTimeRangeEdit);
+                                                }
+                                                KeyCode::Enter => {
+                                                    let now = now_unix_secs() as i64 * 1000;
+                                                    // Read the selected series before firing the event.
+                                                    let selected = vm.pyroscope_series
+                                                        .get(vm.pyroscope_series_index)
+                                                        .cloned();
+                                                    let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
+                                                    let time_range = vm.pyroscope_time_range.clone();
+                                                    app_core.update(Event::PyroscopeSelectSeries { now_unix_ms: now });
+                                                    if let (Some((service, profile_type)), Some(ds_id)) = (selected, ds_id) {
+                                                        spawn_flamegraph_fetch(
+                                                            &pyroscope_tx,
+                                                            grafana_url.clone(),
+                                                            ds_id,
+                                                            grafana_token.clone(),
+                                                            profile_type,
+                                                            service,
+                                                            time_range,
+                                                            now,
+                                                        );
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    PyroscopeSubScreenView::Flamegraph => {
+                                        match key.code {
+                                            KeyCode::Esc | KeyCode::Char('q') => {
+                                                app_core.update(Event::BackToServiceList);
+                                            }
+                                            KeyCode::Left | KeyCode::Char('h') => {
+                                                app_core.update(Event::FlameMoveLeft);
+                                            }
+                                            KeyCode::Right | KeyCode::Char('l') => {
+                                                app_core.update(Event::FlameMoveRight);
+                                            }
+                                            KeyCode::Up | KeyCode::Char('k') => {
+                                                app_core.update(Event::FlameMoveUp);
+                                            }
+                                            KeyCode::Down | KeyCode::Char('j') => {
+                                                app_core.update(Event::FlameMoveDown);
+                                            }
+                                            KeyCode::Enter | KeyCode::Char('z') => {
+                                                app_core.update(Event::FlameZoomIn);
+                                            }
+                                            KeyCode::Backspace | KeyCode::Char('o') => {
+                                                app_core.update(Event::FlameZoomOut);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     CrosstermEvent::Resize(_, _) => {
@@ -356,7 +487,6 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
 fn ui(frame: &mut Frame, vm: &ViewModel) {
     let area = frame.area();
 
-    // Reserve one line at the bottom for the footer in all modes.
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
 
     let footer_text = match vm.screen {
@@ -366,6 +496,17 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
         ScreenView::QueryMode => {
             "Ctrl+C: Quit  Esc: Back  Enter: Execute  Tab: Complete  ↓/↑: History/Select  ←/→: Cursor"
         }
+        ScreenView::PyroscopeMode => match vm.pyroscope_sub_screen {
+            PyroscopeSubScreenView::ServiceList if vm.pyroscope_time_range_editing => {
+                "Esc: Cancel  Enter: Apply"
+            }
+            PyroscopeSubScreenView::ServiceList => {
+                "Esc: Back  j/k: Next/Prev  Enter: Select  t: Time Range"
+            }
+            PyroscopeSubScreenView::Flamegraph => {
+                "Esc: List  ←→↑↓/hjkl: Navigate  Enter/z: Zoom In  o: Zoom Out"
+            }
+        },
     };
     frame.render_widget(
         Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray)),
@@ -374,15 +515,19 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
 
     match vm.screen {
         ScreenView::DatasourceList => {
-            // The datasource dropdown expands to fill the whole content area.
             render_datasource_dropdown(frame, vm, outer[0]);
         }
         ScreenView::QueryMode => {
-            // 3-line datasource bar at top, then query + results below.
             let split =
                 Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
             render_datasource_bar(frame, vm, split[0]);
-            render_query_mode(frame, vm, split[1]);
+            prometheus::render_query_mode(frame, vm, split[1]);
+        }
+        ScreenView::PyroscopeMode => {
+            let split =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
+            render_datasource_bar(frame, vm, split[0]);
+            pyroscope::render_pyroscope_mode(frame, vm, split[1]);
         }
     }
 }
@@ -390,7 +535,7 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
 fn render_datasource_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     let body_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Prometheus Datasources ");
+        .title(" Datasources ");
 
     if vm.loading {
         let loading = Paragraph::new("Loading datasources…").block(body_block);
@@ -405,11 +550,9 @@ fn render_datasource_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         return;
     }
 
-    // Render the block border, then work inside the inner area.
     let inner = body_block.inner(area);
     frame.render_widget(body_block, area);
 
-    // ── Filter input line ─────────────────────────────────────────────────────
     let [filter_area, list_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
 
@@ -427,7 +570,6 @@ fn render_datasource_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     };
     frame.render_widget(Paragraph::new(filter_line), filter_area);
 
-    // ── Datasource table ──────────────────────────────────────────────────────
     if vm.datasources.is_empty() {
         let msg = if vm.datasource_filter.is_empty() {
             "No datasources found."
@@ -506,118 +648,44 @@ fn render_datasource_bar(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     frame.render_widget(Paragraph::new(content).block(block), area);
 }
 
-fn render_query_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let split = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
+// ── Pyroscope async helpers ───────────────────────────────────────────────────
 
-    // ── Query input box ───────────────────────────────────────────────────────
-    let query_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" PromQL ");
-
-    let query_line: Line = highlight::highlight_query(&vm.query, vm.cursor_pos);
-    let query_text = Paragraph::new(query_line).block(query_block);
-    frame.render_widget(query_text, split[0]);
-
-    // ── Results area ──────────────────────────────────────────────────────────
-    let results_area = split[1];
-    let results_block = Block::default().borders(Borders::ALL).title(" Results ");
-
-    if vm.query_loading {
-        let loading = Paragraph::new("Executing query…").block(results_block);
-        frame.render_widget(loading, results_area);
-    } else if let Some(ref err) = vm.query_error {
-        let error = Paragraph::new(format!("Error: {err}"))
-            .style(Style::default().fg(Color::Red))
-            .block(results_block);
-        frame.render_widget(error, results_area);
-    } else if let Some(ref results) = vm.query_results {
-        if results.rows.is_empty() {
-            let empty = Paragraph::new("No results.").block(results_block);
-            frame.render_widget(empty, results_area);
-        } else {
-            render_results_table(frame, results, results_block, results_area);
-        }
-    } else {
-        let hint = Paragraph::new("Type a PromQL expression and press Enter.")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(results_block);
-        frame.render_widget(hint, results_area);
-    }
-
-    // ── Completion popup (rendered on top of results area) ───────────────────
-    render_completion_popup(frame, vm, results_area);
-}
-
-fn render_completion_popup(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let has_completions = !vm.completions.is_empty();
-    let show_loading = vm.completions_loading && !has_completions;
-
-    if !has_completions && !show_loading {
-        return;
-    }
-
-    if show_loading {
-        let popup_w = 20u16.min(area.width);
-        let popup_h = 3u16.min(area.height);
-        let popup_area = Rect::new(area.x, area.y, popup_w, popup_h);
-        frame.render_widget(Clear, popup_area);
-        let loading = Paragraph::new("Loading…")
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(loading, popup_area);
-        return;
-    }
-
-    let max_len = vm.completions.iter().map(|s| s.len()).max().unwrap_or(10);
-    let popup_w = ((max_len as u16) + 4).max(20).min(area.width);
-    let popup_h = ((vm.completions.len() as u16) + 2).min(12).min(area.height);
-    let popup_area = Rect::new(area.x, area.y, popup_w, popup_h);
-
-    frame.render_widget(Clear, popup_area);
-
-    let items: Vec<ListItem> = vm
-        .completions
-        .iter()
-        .map(|c| ListItem::new(c.as_str().to_owned()))
-        .collect();
-
-    let mut list_state = ListState::default();
-    list_state.select(vm.completion_index);
-
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Completions "))
-        .highlight_style(Style::default().fg(Color::Black).bg(Color::White));
-
-    frame.render_stateful_widget(list, popup_area, &mut list_state);
-}
-
-fn render_results_table(
-    frame: &mut Frame,
-    results: &QueryResultsView,
-    block: Block,
-    area: Rect,
+fn spawn_series_fetch(
+    tx: &mpsc::UnboundedSender<PyroscopeMsg>,
+    grafana_url: String,
+    ds_id: u64,
+    token: String,
+    time_range: String,
+    now_ms: i64,
 ) {
-    let header_cells: Vec<Cell> = results
-        .columns
-        .iter()
-        .map(|col| {
-            Cell::from(col.as_str().to_owned()).style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-        })
-        .collect();
-    let header = Row::new(header_cells);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let window_ms = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
+        let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
+        let result = client.series(now_ms - window_ms, now_ms).await
+            .map_err(|e| e.to_string());
+        let _ = tx.send(PyroscopeMsg::Series(result));
+    });
+}
 
-    let rows: Vec<Row> = results
-        .rows
-        .iter()
-        .map(|row| Row::new(row.iter().map(|cell| Cell::from(cell.as_str().to_owned()))))
-        .collect();
-
-    let n = results.columns.len().max(1);
-    let widths: Vec<Constraint> = (0..n).map(|_| Constraint::Fill(1)).collect();
-
-    let table = Table::new(rows, widths).header(header).block(block);
-    frame.render_widget(table, area);
+fn spawn_flamegraph_fetch(
+    tx: &mpsc::UnboundedSender<PyroscopeMsg>,
+    grafana_url: String,
+    ds_id: u64,
+    token: String,
+    profile_type: String,
+    service: String,
+    time_range: String,
+    now_ms: i64,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let window_ms = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
+        let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
+        let result = client
+            .select_merge_stacktraces(&profile_type, &service, now_ms - window_ms, now_ms)
+            .await
+            .map_err(|e| e.to_string());
+        let _ = tx.send(PyroscopeMsg::Flamegraph(result));
+    });
 }
