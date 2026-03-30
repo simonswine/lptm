@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crux_core::{
     macros::effect,
@@ -126,6 +126,10 @@ pub enum Event {
     FlameZoomIn,
     FlameZoomOut,
     FlamegraphViewportChars(u64),
+
+    // Favourites
+    FavouritesLoaded(Vec<String>), // datasource UIDs
+    ToggleFavourite(String),       // datasource UID
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -167,6 +171,7 @@ pub struct Model {
     pub selected_index: usize,
 
     pub datasource_filter: String,
+    pub favourites: HashSet<String>, // datasource UIDs
 
     pub screen: Screen,
     pub query: String,
@@ -210,10 +215,12 @@ pub struct Model {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DatasourceView {
     pub id: u64,
+    pub uid: String,
     pub name: String,
     pub ds_type: String,
     pub url: String,
     pub is_default: bool,
+    pub is_favourite: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -471,6 +478,17 @@ impl App for ExploreTui {
             Event::FlamegraphViewportChars(chars) => {
                 crate::pyroscope::app::handle_flamegraph_viewport_chars(model, chars)
             }
+
+            Event::FavouritesLoaded(uids) => {
+                model.favourites = uids.into_iter().collect();
+                render()
+            }
+            Event::ToggleFavourite(uid) => {
+                if !model.favourites.remove(&uid) {
+                    model.favourites.insert(uid);
+                }
+                render()
+            }
         }
     }
 
@@ -481,7 +499,11 @@ impl App for ExploreTui {
             Screen::PyroscopeMode => ScreenView::PyroscopeMode,
         };
 
-        let indices = filtered_datasource_indices(model);
+        let mut indices = filtered_datasource_indices(model);
+        // Favourites bubble to the top (stable sort preserves relative order within groups).
+        indices.sort_by_key(|&i| {
+            if model.favourites.contains(&model.datasources[i].uid) { 0u8 } else { 1u8 }
+        });
         let selected_index = if indices.is_empty() {
             0
         } else {
@@ -494,10 +516,12 @@ impl App for ExploreTui {
                 let ds = &model.datasources[i];
                 DatasourceView {
                     id: ds.id,
+                    uid: ds.uid.clone(),
                     name: ds.name.clone(),
                     ds_type: normalize_ds_type(&ds.ds_type).to_string(),
                     url: ds.url.clone(),
                     is_default: ds.is_default,
+                    is_favourite: model.favourites.contains(&ds.uid),
                 }
             })
             .collect();

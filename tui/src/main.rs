@@ -4,6 +4,8 @@ mod http;
 mod prometheus;
 mod pyroscope;
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use clap::Parser;
 use log::info;
@@ -58,6 +60,36 @@ fn setup_logging() {
 
 fn history_path() -> Option<std::path::PathBuf> {
     grafex_dir().map(|d| d.join("history"))
+}
+
+fn favourites_path() -> Option<std::path::PathBuf> {
+    grafex_dir().map(|d| d.join("favourites.json"))
+}
+
+fn load_favourites(url_hash: &str) -> Vec<String> {
+    let Some(path) = favourites_path() else { return vec![] };
+    let Ok(content) = std::fs::read_to_string(&path) else { return vec![] };
+    let Ok(map) = serde_json::from_str::<HashMap<String, Vec<String>>>(&content) else {
+        return vec![];
+    };
+    map.get(url_hash).cloned().unwrap_or_default()
+}
+
+fn save_favourites(url_hash: &str, uids: &[String]) {
+    let Some(path) = favourites_path() else { return };
+    let mut map: HashMap<String, Vec<String>> =
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default();
+    if uids.is_empty() {
+        map.remove(url_hash);
+    } else {
+        map.insert(url_hash.to_string(), uids.to_vec());
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = std::fs::write(&path, json);
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -149,6 +181,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
         url: args.grafana_url,
         token: args.grafana_token,
     });
+    app_core.update(Event::FavouritesLoaded(load_favourites(&url_hash)));
 
     let mut reader = EventStream::new();
 
@@ -243,6 +276,22 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         } else {
                                             history_pos = None;
                                             app_core.update(Event::EnterQuery);
+                                        }
+                                    }
+                                    (KeyCode::Char('f'), _)
+                                        if vm.datasource_filter.is_empty() =>
+                                    {
+                                        if let Some(ds) = vm.datasources.get(vm.selected_index) {
+                                            let uid = ds.uid.clone();
+                                            app_core.update(Event::ToggleFavourite(uid));
+                                            let vm2 = app_core.core.view();
+                                            let fav_uids: Vec<String> = vm2
+                                                .datasources
+                                                .iter()
+                                                .filter(|d| d.is_favourite)
+                                                .map(|d| d.uid.clone())
+                                                .collect();
+                                            save_favourites(&url_hash, &fav_uids);
                                         }
                                     }
                                     (KeyCode::Char(c), _) => {
@@ -511,7 +560,7 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
 
     let footer_text = match vm.screen {
         ScreenView::DatasourceList => {
-            "Esc: Quit/Clear  j/↓: Next  k/↑: Prev  Enter: Select  Type: Filter"
+            "Esc: Quit/Clear  j/↓: Next  k/↑: Prev  Enter: Select  f: Favourite  Type: Filter"
         }
         ScreenView::QueryMode => {
             "Ctrl+C: Quit  Esc: Back  Enter: Execute  Tab: Complete  ↓/↑: History/Select  ←/→: Cursor"
@@ -616,9 +665,10 @@ fn render_datasource_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         .datasources
         .iter()
         .map(|ds| {
+            let fav = if ds.is_favourite { "★ " } else { "  " };
             let default_tag = if ds.is_default { " [default]" } else { "" };
             Row::new(vec![
-                Cell::from(format!("{}{}", ds.name, default_tag)),
+                Cell::from(format!("{}{}{}", fav, ds.name, default_tag)),
                 Cell::from(ds.ds_type.clone()),
                 Cell::from(ds.url.clone()),
             ])
