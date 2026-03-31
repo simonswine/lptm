@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame,
 };
 use shared::{FlamegraphView, PyroscopeSubScreenView, ViewModel};
@@ -128,6 +128,43 @@ fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) 
     table_state.select(Some(vm.pyroscope_series_index));
 
     frame.render_stateful_widget(table, list_area, &mut table_state);
+
+    if vm.pyroscope_profile_type_dropdown_open {
+        render_profile_type_dropdown(frame, vm, inner);
+    }
+}
+
+fn render_profile_type_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+    if vm.pyroscope_profile_types.is_empty() {
+        return;
+    }
+    let max_len = vm.pyroscope_profile_types.iter().map(|s| s.len()).max().unwrap_or(10);
+    let popup_w = ((max_len as u16) + 4).min(area.width);
+    let popup_h = ((vm.pyroscope_profile_types.len() as u16) + 2).min(area.height);
+    let popup_area = Rect::new(area.x, area.y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let items: Vec<ListItem> = vm
+        .pyroscope_profile_types
+        .iter()
+        .map(|pt| ListItem::new(pt.as_str().to_owned()))
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(vm.pyroscope_profile_type_index));
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Profile Type "))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    frame.render_stateful_widget(list, popup_area, &mut list_state);
 }
 
 fn render_pyroscope_flamegraph_screen(frame: &mut Frame, vm: &ViewModel, area: Rect) {

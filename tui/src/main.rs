@@ -470,6 +470,21 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                         app_core.update(Event::BackFromPyroscope);
                                                     }
                                                 }
+                                                // ── Profile type dropdown open ───────
+                                                _ if vm.pyroscope_profile_type_dropdown_open => {
+                                                    match key.code {
+                                                        KeyCode::Char('j') | KeyCode::Down => {
+                                                            app_core.update(Event::PyroscopeProfileTypeNext);
+                                                        }
+                                                        KeyCode::Char('k') | KeyCode::Up => {
+                                                            app_core.update(Event::PyroscopeProfileTypePrev);
+                                                        }
+                                                        KeyCode::Enter | KeyCode::Esc | KeyCode::Char('p') => {
+                                                            app_core.update(Event::PyroscopeProfileTypeDropdownClose);
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
                                                 // ── Filter focused mode ──────────────
                                                 _ if vm.pyroscope_service_filter_focused => {
                                                     match key.code {
@@ -498,11 +513,8 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 KeyCode::Char('t') => {
                                                     app_core.update(Event::PyroscopeTimeRangeEdit);
                                                 }
-                                                KeyCode::Char('[') => {
-                                                    app_core.update(Event::PyroscopeProfileTypePrev);
-                                                }
-                                                KeyCode::Char(']') => {
-                                                    app_core.update(Event::PyroscopeProfileTypeNext);
+                                                KeyCode::Char('p') => {
+                                                    app_core.update(Event::PyroscopeProfileTypeDropdownOpen);
                                                 }
                                                 KeyCode::Enter => {
                                                     let now = now_unix_secs() as i64 * 1000;
@@ -594,11 +606,14 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
             "Ctrl+C: Quit  Esc: Back  Enter: Execute  Tab: Complete  ↓/↑: History/Select  ←/→: Cursor"
         }
         ScreenView::PyroscopeMode => match vm.pyroscope_sub_screen {
+            PyroscopeSubScreenView::ServiceList if vm.pyroscope_profile_type_dropdown_open => {
+                "Esc/Enter/p: Close  j/k: Select profile type"
+            }
             PyroscopeSubScreenView::ServiceList if vm.pyroscope_time_range_editing => {
                 "Esc: Cancel  Enter: Apply"
             }
             PyroscopeSubScreenView::ServiceList => {
-                "Esc: Back/Clear  j/k: Next/Prev  Enter: Select  t: Time Range  [/]: Profile Type  /: Filter"
+                "Esc: Back/Clear  j/k: Next/Prev  Enter: Select  t: Time Range  p: Profile Type  /: Filter"
             }
             PyroscopeSubScreenView::Flamegraph => {
                 "Esc: List  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller  Enter/z: Zoom In  o: Zoom Out"

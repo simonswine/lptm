@@ -110,6 +110,8 @@ pub enum Event {
 
     PyroscopeProfileTypeNext,
     PyroscopeProfileTypePrev,
+    PyroscopeProfileTypeDropdownOpen,
+    PyroscopeProfileTypeDropdownClose,
 
     PyroscopeServiceFilterFocus,
     PyroscopeServiceFilterBlur,
@@ -205,6 +207,7 @@ pub struct Model {
     pub pyroscope_series: Vec<PyroscopeSeriesItem>,
     pub pyroscope_profile_types: Vec<String>,
     pub pyroscope_profile_type_index: usize,
+    pub pyroscope_profile_type_dropdown_open: bool,
     pub pyroscope_service_filter: String,
     pub pyroscope_service_filter_focused: bool,
     pub pyroscope_series_index: usize,
@@ -281,6 +284,7 @@ pub struct ViewModel {
     pub pyroscope_series: Vec<(String, String)>, // filtered by profile type + service filter
     pub pyroscope_profile_types: Vec<String>,
     pub pyroscope_profile_type_index: usize,
+    pub pyroscope_profile_type_dropdown_open: bool,
     pub pyroscope_service_filter: String,
     pub pyroscope_service_filter_focused: bool,
     pub pyroscope_series_index: usize,
@@ -471,6 +475,14 @@ impl App for ExploreTui {
             Event::PyroscopeProfileTypePrev => {
                 crate::pyroscope::app::handle_pyroscope_profile_type_prev(model)
             }
+            Event::PyroscopeProfileTypeDropdownOpen => {
+                model.pyroscope_profile_type_dropdown_open = true;
+                render()
+            }
+            Event::PyroscopeProfileTypeDropdownClose => {
+                model.pyroscope_profile_type_dropdown_open = false;
+                render()
+            }
             Event::PyroscopeServiceFilterFocus => {
                 model.pyroscope_service_filter_focused = true;
                 render()
@@ -616,6 +628,7 @@ impl App for ExploreTui {
             pyroscope_series,
             pyroscope_profile_types: model.pyroscope_profile_types.clone(),
             pyroscope_profile_type_index: model.pyroscope_profile_type_index,
+            pyroscope_profile_type_dropdown_open: model.pyroscope_profile_type_dropdown_open,
             pyroscope_service_filter: model.pyroscope_service_filter.clone(),
             pyroscope_service_filter_focused: model.pyroscope_service_filter_focused,
             pyroscope_series_index,
