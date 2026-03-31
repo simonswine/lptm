@@ -1187,8 +1187,8 @@ fn spawn_timeline_fetch(
     tokio::spawn(async move {
         let window_s = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as f64;
         let window_ms = (window_s * 1000.0) as i64;
-        // 4 data points per character column for a smooth line; clamp to ≥15 s.
-        let cols = chart_width.max(20) as f64 * 4.0;
+        // One data point per terminal column for a smooth connected line.
+        let cols = chart_width.max(20) as f64;
         let step_s = (window_s / cols).max(15.0);
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client
