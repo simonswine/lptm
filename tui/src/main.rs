@@ -749,6 +749,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     }
                                     PyroscopeSubScreenView::Flamegraph => {
                                         match key.code {
+                                            KeyCode::Esc if vm.sandwich_view.is_some() => {
+                                                app_core.update(Event::FlameSandwichClear);
+                                            }
                                             KeyCode::Esc | KeyCode::Char('q') => {
                                                 let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
                                                 let time_range = vm.pyroscope_time_range.clone();
@@ -793,6 +796,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                             }
                                             KeyCode::Backspace | KeyCode::Char('o') => {
                                                 app_core.update(Event::FlameZoomOut);
+                                            }
+                                            KeyCode::Char('s') => {
+                                                app_core.update(Event::FlameSandwich);
                                             }
                                             _ => {}
                                         }
@@ -874,8 +880,11 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
             PyroscopeSubScreenView::ServiceList => {
                 "Esc: Back/Clear  j/k: Next/Prev  Enter: Select  t: Time Range  p: Profile Type  /: Filter"
             }
+            PyroscopeSubScreenView::Flamegraph if vm.sandwich_view.is_some() => {
+                "Esc/s: Exit Sandwich  Tab: Timeline  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller"
+            }
             PyroscopeSubScreenView::Flamegraph => {
-                "Esc: List  Tab: Timeline  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller  Enter/z: Zoom In  o: Zoom Out"
+                "Esc: List  Tab: Timeline  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller  Enter/z: Zoom In  o: Zoom Out  s: Sandwich"
             }
             PyroscopeSubScreenView::Timeline => {
                 "Esc: List  Tab: Heatmap"

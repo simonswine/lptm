@@ -6,7 +6,10 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame,
 };
-use shared::{pyroscope::{HeatmapView, ProfileUnit, TimelineView}, FlamegraphView, PyroscopeSubScreenView, ViewModel};
+use shared::{
+    pyroscope::{HeatmapView, ProfileUnit, TimelineView},
+    FlamegraphLevelView, FlamegraphView, PyroscopeSubScreenView, SandwichView, ViewModel,
+};
 
 pub fn render_pyroscope_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     match vm.pyroscope_sub_screen {
@@ -176,6 +179,13 @@ fn render_pyroscope_flamegraph_screen(frame: &mut Frame, vm: &ViewModel, area: R
 
     render_profile_header(frame, vm, info_area);
 
+    if let Some(ref sw) = vm.sandwich_view {
+        let title = format!(" Sandwich: {}  [s/Esc: exit] ", sw.target_name);
+        let block = Block::default().borders(Borders::ALL).title(title);
+        render_sandwich_view(frame, sw, block, fg_area);
+        return;
+    }
+
     let fg_block = Block::default().borders(Borders::ALL).title(" Icicle Graph ");
     if vm.pyroscope_flamegraph_loading {
         frame.render_widget(
@@ -201,6 +211,45 @@ fn render_pyroscope_flamegraph_screen(frame: &mut Frame, vm: &ViewModel, area: R
     }
 }
 
+/// Render one level row into the terminal at `(x, y)`, normalised to `root_samples`.
+fn render_level_row(
+    frame: &mut Frame,
+    level: &FlamegraphLevelView,
+    w: u64,
+    root_samples: u64,
+    x: u16,
+    y: u16,
+) {
+    let row_area = Rect::new(x, y, w as u16, 1);
+    let mut spans: Vec<Span> = Vec::new();
+    let mut cursor = 0u64;
+
+    for fv in &level.frames {
+        let xc = fv.x_start * w / root_samples;
+        let xc_end = (fv.x_start + fv.width) * w / root_samples;
+        let cw = xc_end.saturating_sub(xc) as usize;
+        if cw == 0 {
+            continue;
+        }
+        if xc > cursor {
+            spans.push(Span::raw(" ".repeat((xc - cursor) as usize)));
+        }
+        let label = center_truncate(&fv.name, cw);
+        let base_style = Style::default().fg(Color::Black).bg(frame_color(&fv.name));
+        let style = if fv.is_selected {
+            base_style.add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else {
+            base_style
+        };
+        spans.push(Span::styled(label, style));
+        cursor = xc_end;
+    }
+    if cursor < w {
+        spans.push(Span::raw(" ".repeat((w - cursor) as usize)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
+}
+
 fn render_flamegraph(frame: &mut Frame, fg: &FlamegraphView, block: Block, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -215,41 +264,7 @@ fn render_flamegraph(frame: &mut Frame, fg: &FlamegraphView, block: Block, area:
     let n_visible = fg.levels.len().min(usable_h as usize);
 
     for li in 0..n_visible {
-        let row_y = inner.y + li as u16;
-        let row_area = Rect::new(inner.x, row_y, inner.width, 1);
-
-        let mut spans: Vec<Span> = Vec::new();
-        let mut x_cursor = 0u64;
-
-        for frame_view in &fg.levels[li].frames {
-            let x_char = frame_view.x_start * w / fg.root_samples;
-            let x_char_end = (frame_view.x_start + frame_view.width) * w / fg.root_samples;
-            let char_w = x_char_end.saturating_sub(x_char) as usize;
-            if char_w == 0 {
-                continue;
-            }
-
-            if x_char > x_cursor {
-                spans.push(Span::raw(" ".repeat((x_char - x_cursor) as usize)));
-            }
-
-            let label = center_truncate(&frame_view.name, char_w);
-            let base_style = Style::default().fg(Color::Black).bg(frame_color(&frame_view.name));
-            let style = if frame_view.is_selected {
-                base_style.add_modifier(Modifier::REVERSED | Modifier::BOLD)
-            } else {
-                base_style
-            };
-            spans.push(Span::styled(label, style));
-            x_cursor = x_char_end;
-        }
-
-        // Fill remainder with spaces.
-        if x_cursor < w {
-            spans.push(Span::raw(" ".repeat((w - x_cursor) as usize)));
-        }
-
-        frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
+        render_level_row(frame, &fg.levels[li], w, fg.root_samples, inner.x, inner.y + li as u16);
     }
 
     // Status line at the bottom of the inner area.
@@ -257,6 +272,62 @@ fn render_flamegraph(frame: &mut Frame, fg: &FlamegraphView, block: Block, area:
         " {} — {:.1}% total, {:.1}% self  [{}]",
         fg.selected_name, fg.selected_total_pct, fg.selected_self_pct, fg.units
     );
+    let status_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+    frame.render_widget(
+        Paragraph::new(status).style(Style::default().fg(Color::Cyan)),
+        status_area,
+    );
+}
+
+fn render_sandwich_view(frame: &mut Frame, sw: &SandwichView, block: Block, area: Rect) {
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 3 || inner.width == 0 || sw.target_samples == 0 {
+        return;
+    }
+
+    let usable_h = inner.height - 1; // last row = status line
+    let w = inner.width as u64;
+    let samples = sw.target_samples;
+    let mut row = 0u16;
+
+    // Callers (outermost first = top of screen)
+    for level in &sw.callers {
+        if row >= usable_h {
+            break;
+        }
+        render_level_row(frame, level, w, samples, inner.x, inner.y + row);
+        row += 1;
+    }
+
+    // Target bar (full width, highlighted)
+    if row < usable_h {
+        let label = center_truncate(&sw.target_name, w as usize);
+        let style = Style::default()
+            .fg(Color::Black)
+            .bg(frame_color(&sw.target_name))
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+        let row_area = Rect::new(inner.x, inner.y + row, inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(label, style))),
+            row_area,
+        );
+        row += 1;
+    }
+
+    // Callees (direct callee first = just below target)
+    for level in &sw.callees {
+        if row >= usable_h {
+            break;
+        }
+        render_level_row(frame, level, w, samples, inner.x, inner.y + row);
+        row += 1;
+    }
+
+    // Status line
+    let pct = sw.target_samples as f64 / sw.root_samples as f64 * 100.0;
+    let status = format!(" {} — {:.1}% of profile  [{}]", sw.target_name, pct, sw.units);
     let status_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().fg(Color::Cyan)),

@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::prometheus::types::{
     PrometheusResponse, PrometheusStringListResponse, PrometheusVectorItem,
 };
-use crate::pyroscope::{build_flamegraph_view, FlameGraph, FlamegraphNav, FlamegraphView};
+use crate::pyroscope::{
+    build_flamegraph_view, build_sandwich_view, FlameGraph, FlamegraphNav, FlamegraphView,
+    SandwichView,
+};
 
 #[effect]
 pub enum Effect {
@@ -142,6 +145,10 @@ pub enum Event {
     FlameZoomIn,
     FlameZoomOut,
     FlamegraphViewportChars(u64),
+    /// Toggle sandwich view for the currently selected frame name.
+    FlameSandwich,
+    /// Clear sandwich view (return to normal flamegraph).
+    FlameSandwichClear,
 
     // Favourites
     FavouritesLoaded(Vec<String>), // datasource UIDs
@@ -242,6 +249,8 @@ pub struct Model {
     pub pyroscope_flamegraph_error: Option<String>,
     pub pyroscope_flamegraph: Option<FlameGraph>,
     pub flamegraph_nav: FlamegraphNav,
+    /// When `Some`, the sandwich view is active for this function name.
+    pub sandwich_name: Option<String>,
 
     pub pyroscope_timeline_loading: bool,
     pub pyroscope_timeline_error: Option<String>,
@@ -348,6 +357,7 @@ pub struct ViewModel {
     pub pyroscope_flamegraph_loading: bool,
     pub pyroscope_flamegraph_error: Option<String>,
     pub flamegraph: Option<FlamegraphView>,
+    pub sandwich_view: Option<SandwichView>,
 
     pub pyroscope_timeline_loading: bool,
     pub pyroscope_timeline_error: Option<String>,
@@ -585,6 +595,7 @@ impl App for ExploreTui {
                 )
             }
             Event::PyroscopeFlamegraphLoaded(result) => {
+                model.sandwich_name = None;
                 crate::pyroscope::app::handle_pyroscope_flamegraph_loaded(model, result)
             }
             Event::PyroscopeTimelineLoaded(result) => {
@@ -606,6 +617,29 @@ impl App for ExploreTui {
             Event::FlameZoomOut => crate::pyroscope::app::handle_flame_zoom_out(model),
             Event::FlamegraphViewportChars(chars) => {
                 crate::pyroscope::app::handle_flamegraph_viewport_chars(model, chars)
+            }
+            Event::FlameSandwich => {
+                if let Some(ref fg) = model.pyroscope_flamegraph {
+                    let name = fg
+                        .levels
+                        .get(model.flamegraph_nav.sel_level)
+                        .and_then(|lv| {
+                            let i = model.flamegraph_nav.sel_frame * 4 + 3;
+                            lv.values.get(i).and_then(|&ni| fg.names.get(ni as usize)).cloned()
+                        });
+                    if let Some(name) = name {
+                        if model.sandwich_name.as_deref() == Some(&name) {
+                            model.sandwich_name = None;
+                        } else {
+                            model.sandwich_name = Some(name);
+                        }
+                    }
+                }
+                render()
+            }
+            Event::FlameSandwichClear => {
+                model.sandwich_name = None;
+                render()
             }
 
             Event::FavouritesLoaded(uids) => {
@@ -731,18 +765,24 @@ impl App for ExploreTui {
         let completions = crate::prometheus::app::get_completions(model);
         let completions_loading = model.metric_names_loading || model.label_names_loading;
 
-        let flamegraph = model
-            .pyroscope_flamegraph
-            .as_ref()
-            .map(|fg| {
-                let mut fgv = build_flamegraph_view(fg, &model.flamegraph_nav);
-                fgv.units = crate::pyroscope::ProfileUnit::from_profile_type_id(
-                    &model.pyroscope_selected_profile_type,
-                )
-                .label()
-                .to_string();
-                fgv
-            });
+        let units = crate::pyroscope::ProfileUnit::from_profile_type_id(
+            &model.pyroscope_selected_profile_type,
+        )
+        .label()
+        .to_string();
+
+        let flamegraph = model.pyroscope_flamegraph.as_ref().map(|fg| {
+            let mut fgv = build_flamegraph_view(fg, &model.flamegraph_nav);
+            fgv.units = units.clone();
+            fgv
+        });
+
+        let sandwich_view = model.sandwich_name.as_ref().and_then(|name| {
+            model
+                .pyroscope_flamegraph
+                .as_ref()
+                .and_then(|fg| build_sandwich_view(fg, name, units))
+        });
 
         let pyroscope_sub_screen = match model.pyroscope_sub_screen {
             PyroscopeSubScreen::ServiceList => PyroscopeSubScreenView::ServiceList,
@@ -820,6 +860,7 @@ impl App for ExploreTui {
             pyroscope_flamegraph_loading: model.pyroscope_flamegraph_loading,
             pyroscope_flamegraph_error: model.pyroscope_flamegraph_error.clone(),
             flamegraph,
+            sandwich_view,
             pyroscope_timeline_loading: model.pyroscope_timeline_loading,
             pyroscope_timeline_error: model.pyroscope_timeline_error.clone(),
             timeline,

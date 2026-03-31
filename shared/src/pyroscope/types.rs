@@ -234,6 +234,207 @@ pub struct FlamegraphView {
     pub selected_self_pct: f64,
 }
 
+// ── Sandwich view ─────────────────────────────────────────────────────────────
+
+/// The three-panel "sandwich" view for a pinned function name, matching the
+/// behaviour of the Grafana flamegraph panel's sandwich mode.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SandwichView {
+    pub target_name: String,
+    /// Total samples across all occurrences of the target function.
+    pub target_samples: u64,
+    /// Total samples in the full flamegraph (for "% of profile" label).
+    pub root_samples: u64,
+    /// Merged callers: outermost (root-side) first, direct caller last.
+    pub callers: Vec<FlamegraphLevelView>,
+    /// Merged callees: direct callee first, outermost last.
+    pub callees: Vec<FlamegraphLevelView>,
+    pub units: String,
+}
+
+/// Build a sandwich view for `target_name` from the flamegraph.
+///
+/// Finds all occurrences of `target_name`, then:
+/// - Merges the ancestor chains into a callers tree (each ancestor is credited
+///   with the occurrence's own sample count, as Grafana does).
+/// - Merges the descendant trees into a callees tree (actual sample widths).
+/// Frames at each merged level are sorted by total samples descending and laid
+/// out consecutively from x=0.
+pub fn build_sandwich_view(fg: &FlameGraph, target_name: &str, units: String) -> Option<SandwichView> {
+    use std::collections::BTreeMap;
+
+    let root_samples = fg.total as u64;
+
+    // ── Find all occurrences ─────────────────────────────────────────────────
+    // Stored as parallel vecs: (level_idx, x_off, x_end, width)
+    let mut occ_level: Vec<usize> = Vec::new();
+    let mut occ_x_off: Vec<u64> = Vec::new();
+    let mut occ_x_end: Vec<u64> = Vec::new();
+    let mut occ_width: Vec<u64> = Vec::new();
+
+    for (li, lv) in fg.levels.iter().enumerate() {
+        let raw = &lv.values;
+        for i in 0..(raw.len() / 4) {
+            let width = raw[i * 4 + 1] as u64;
+            if width == 0 {
+                continue;
+            }
+            let name_idx = raw[i * 4 + 3] as usize;
+            if fg.names.get(name_idx).map(|n| n.as_str()) == Some(target_name) {
+                let x_off = raw[i * 4] as u64;
+                occ_level.push(li);
+                occ_x_off.push(x_off);
+                occ_x_end.push(x_off + width);
+                occ_width.push(width);
+            }
+        }
+    }
+    if occ_level.is_empty() {
+        return None;
+    }
+    let n_occs = occ_level.len();
+    let target_samples: u64 = occ_width.iter().sum();
+
+    // ── Build callees (what the target calls) ────────────────────────────────
+    // depth_callees[d] = BTreeMap<name, (total_samples, self_samples)>
+    let mut depth_callees: Vec<BTreeMap<String, (u64, u64)>> = Vec::new();
+
+    for idx in 0..n_occs {
+        let mut ranges: Vec<(u64, u64)> = vec![(occ_x_off[idx], occ_x_end[idx])];
+        let mut d = 0usize;
+        loop {
+            if ranges.is_empty() {
+                break;
+            }
+            let li = occ_level[idx] + 1 + d;
+            if li >= fg.levels.len() {
+                break;
+            }
+            if d == depth_callees.len() {
+                depth_callees.push(BTreeMap::new());
+            }
+            let raw = &fg.levels[li].values;
+            let mut next_ranges: Vec<(u64, u64)> = Vec::new();
+            for i in 0..(raw.len() / 4) {
+                let fx = raw[i * 4] as u64;
+                let fw = raw[i * 4 + 1] as u64;
+                if fw == 0 {
+                    continue;
+                }
+                let fx_end = fx + fw;
+                let fs = raw[i * 4 + 2] as u64;
+                let mut clipped = 0u64;
+                for &(rs, re) in &ranges {
+                    if fx < re && fx_end > rs {
+                        clipped += fx_end.min(re) - fx.max(rs);
+                        next_ranges.push((fx.max(rs), fx_end.min(re)));
+                    }
+                }
+                if clipped == 0 {
+                    continue;
+                }
+                let name = fg.names.get(raw[i * 4 + 3] as usize).cloned().unwrap_or_default();
+                let self_s = (fs as u128 * clipped as u128 / fw as u128) as u64;
+                let e = depth_callees[d].entry(name).or_insert((0, 0));
+                e.0 += clipped;
+                e.1 += self_s;
+            }
+            ranges = next_ranges;
+            d += 1;
+        }
+    }
+
+    // ── Build callers (what calls the target) ────────────────────────────────
+    // Each ancestor is credited with occ.width (Grafana's "trim to child" approach).
+    // depth_callers[d] = BTreeMap<name, total_samples>  (d=0 = direct caller)
+    let max_caller_depth = *occ_level.iter().max().unwrap_or(&0);
+    let mut depth_callers: Vec<BTreeMap<String, u64>> =
+        (0..max_caller_depth).map(|_| BTreeMap::new()).collect();
+
+    for idx in 0..n_occs {
+        for d in 0..occ_level[idx] {
+            let li = occ_level[idx] - 1 - d;
+            let raw = &fg.levels[li].values;
+            for i in 0..(raw.len() / 4) {
+                let fx = raw[i * 4] as u64;
+                let fw = raw[i * 4 + 1] as u64;
+                if fw == 0 {
+                    continue;
+                }
+                if fx <= occ_x_off[idx] && fx + fw > occ_x_off[idx] {
+                    let name =
+                        fg.names.get(raw[i * 4 + 3] as usize).cloned().unwrap_or_default();
+                    *depth_callers[d].entry(name).or_insert(0) += occ_width[idx];
+                    break;
+                }
+            }
+        }
+    }
+
+    // ── Convert to FlamegraphLevelView ────────────────────────────────────────
+    // Frames sorted by total samples descending, laid out consecutively from x=0.
+    let make_callee_level = |map: &BTreeMap<String, (u64, u64)>| -> FlamegraphLevelView {
+        let mut v: Vec<_> = map.iter().map(|(n, &(t, s))| (n.as_str(), t, s)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut x = 0u64;
+        FlamegraphLevelView {
+            frames: v
+                .into_iter()
+                .map(|(n, t, s)| {
+                    let f = FlamegraphFrameView {
+                        name: n.to_string(),
+                        x_start: x,
+                        width: t,
+                        self_samples: s,
+                        total_pct: t as f64 / target_samples as f64 * 100.0,
+                        self_pct: s as f64 / target_samples as f64 * 100.0,
+                        is_selected: false,
+                    };
+                    x += t;
+                    f
+                })
+                .collect(),
+        }
+    };
+
+    let make_caller_level = |map: &BTreeMap<String, u64>| -> FlamegraphLevelView {
+        let mut v: Vec<_> = map.iter().map(|(n, &t)| (n.as_str(), t)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut x = 0u64;
+        FlamegraphLevelView {
+            frames: v
+                .into_iter()
+                .map(|(n, t)| {
+                    let f = FlamegraphFrameView {
+                        name: n.to_string(),
+                        x_start: x,
+                        width: t,
+                        self_samples: 0,
+                        total_pct: t as f64 / target_samples as f64 * 100.0,
+                        self_pct: 0.0,
+                        is_selected: false,
+                    };
+                    x += t;
+                    f
+                })
+                .collect(),
+        }
+    };
+
+    let callees: Vec<_> = depth_callees.iter().map(|m| make_callee_level(m)).collect();
+    let mut callers: Vec<_> = depth_callers.iter().map(|m| make_caller_level(m)).collect();
+    callers.reverse(); // outermost (root-side) first for top-to-bottom rendering
+
+    Some(SandwichView {
+        target_name: target_name.to_string(),
+        target_samples,
+        root_samples,
+        callers,
+        callees,
+        units,
+    })
+}
+
 // ── View builder ──────────────────────────────────────────────────────────────
 
 pub fn build_flamegraph_view(fg: &FlameGraph, nav: &FlamegraphNav) -> FlamegraphView {
