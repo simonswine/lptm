@@ -9,9 +9,11 @@ mod gen {
 }
 
 use gen::querier::v1::{
-    ProfileFormat, SelectMergeStacktracesRequest, SelectMergeStacktracesResponse, SeriesRequest,
-    SeriesResponse,
+    HeatmapQueryType, ProfileFormat, SelectHeatmapRequest, SelectHeatmapResponse,
+    SelectMergeStacktracesRequest, SelectMergeStacktracesResponse, SelectSeriesRequest,
+    SelectSeriesResponse, SeriesRequest, SeriesResponse,
 };
+use shared::pyroscope::{HeatmapSlot, TimelinePoint};
 
 pub struct PyroscopeClient {
     http: Client,
@@ -102,6 +104,66 @@ impl PyroscopeClient {
         items.sort();
         items.dedup();
         Ok(items)
+    }
+
+    pub async fn select_series(
+        &self,
+        profile_type_id: &str,
+        service: &str,
+        start: i64,
+        end: i64,
+        step_s: f64,
+    ) -> Result<Vec<TimelinePoint>> {
+        let req = SelectSeriesRequest {
+            profile_typeID: profile_type_id.into(),
+            label_selector: format!("{{service_name=\"{service}\"}}"),
+            start,
+            end,
+            step: step_s,
+            ..SelectSeriesRequest::default()
+        };
+        let resp: SelectSeriesResponse = self.post("SelectSeries", &req).await?;
+
+        // Aggregate all series (sum) into a single timeline.
+        let mut map: std::collections::BTreeMap<i64, f64> = std::collections::BTreeMap::new();
+        for series in &resp.series {
+            for pt in &series.points {
+                *map.entry(pt.timestamp).or_default() += pt.value;
+            }
+        }
+        Ok(map.into_iter().map(|(ts, v)| TimelinePoint { timestamp_ms: ts, value: v }).collect())
+    }
+
+    pub async fn select_heatmap(
+        &self,
+        profile_type_id: &str,
+        service: &str,
+        start: i64,
+        end: i64,
+        step_s: f64,
+    ) -> Result<Vec<HeatmapSlot>> {
+        let req = SelectHeatmapRequest {
+            profile_typeID: profile_type_id.into(),
+            label_selector: format!("{{service_name=\"{service}\"}}"),
+            start,
+            end,
+            step: step_s,
+            query_type: HeatmapQueryType::HEATMAP_QUERY_TYPE_INDIVIDUAL.into(),
+            ..SelectHeatmapRequest::default()
+        };
+        let resp: SelectHeatmapResponse = self.post("SelectHeatmap", &req).await?;
+
+        let slots: Vec<HeatmapSlot> = resp
+            .series
+            .into_iter()
+            .flat_map(|s| s.slots.into_iter())
+            .map(|slot| HeatmapSlot {
+                timestamp_ms: slot.timestamp,
+                y_min: slot.y_min,
+                counts: slot.counts,
+            })
+            .collect();
+        Ok(slots)
     }
 
     pub async fn select_merge_stacktraces(

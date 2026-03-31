@@ -6,6 +6,8 @@ import "types/v1/types.proto";
 service QuerierService {
   rpc Series(SeriesRequest) returns (SeriesResponse);
   rpc SelectMergeStacktraces(SelectMergeStacktracesRequest) returns (SelectMergeStacktracesResponse);
+  rpc SelectSeries(SelectSeriesRequest) returns (SelectSeriesResponse);
+  rpc SelectHeatmap(SelectHeatmapRequest) returns (SelectHeatmapResponse);
 }
 
 message SeriesRequest {
@@ -49,4 +51,38 @@ message FlameGraph {
 
 message Level {
   repeated int64 values = 1;
+}
+
+message SelectSeriesRequest {
+  string profile_typeID = 1;
+  string label_selector = 2;
+  int64 start = 3;
+  int64 end = 4;
+  repeated string group_by = 5;
+  double step = 6;
+  optional types.v1.TimeSeriesAggregationType aggregation = 7;
+}
+
+message SelectSeriesResponse {
+  repeated types.v1.Series series = 1;
+}
+
+enum HeatmapQueryType {
+  HEATMAP_QUERY_TYPE_UNSPECIFIED = 0;
+  HEATMAP_QUERY_TYPE_INDIVIDUAL = 1;
+  HEATMAP_QUERY_TYPE_SPAN = 2;
+}
+
+message SelectHeatmapRequest {
+  string profile_typeID = 1;
+  string label_selector = 2;
+  int64 start = 3;
+  int64 end = 4;
+  double step = 5;
+  repeated string group_by = 6;
+  HeatmapQueryType query_type = 7;
+}
+
+message SelectHeatmapResponse {
+  repeated types.v1.HeatmapSeries series = 1;
 }

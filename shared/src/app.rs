@@ -121,6 +121,9 @@ pub enum Event {
 
     PyroscopeSelectSeries { now_unix_ms: i64 },
     PyroscopeFlamegraphLoaded(Result<Option<FlameGraph>, String>),
+    PyroscopeTimelineLoaded(Result<Vec<crate::pyroscope::TimelinePoint>, String>),
+    PyroscopeHeatmapLoaded(Result<Vec<crate::pyroscope::HeatmapSlot>, String>),
+    PyroscopeCycleView,
 
     BackToServiceList,
     BackFromPyroscope,
@@ -163,6 +166,8 @@ pub enum PyroscopeSubScreen {
     #[default]
     ServiceList,
     Flamegraph,
+    Timeline,
+    Heatmap,
 }
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -217,6 +222,14 @@ pub struct Model {
     pub pyroscope_flamegraph_error: Option<String>,
     pub pyroscope_flamegraph: Option<FlameGraph>,
     pub flamegraph_nav: FlamegraphNav,
+
+    pub pyroscope_timeline_loading: bool,
+    pub pyroscope_timeline_error: Option<String>,
+    pub pyroscope_timeline: Vec<crate::pyroscope::TimelinePoint>,
+
+    pub pyroscope_heatmap_loading: bool,
+    pub pyroscope_heatmap_error: Option<String>,
+    pub pyroscope_heatmap: Vec<crate::pyroscope::HeatmapSlot>,
 }
 
 // ── ViewModel types ───────────────────────────────────────────────────────────
@@ -245,6 +258,8 @@ pub enum PyroscopeSubScreenView {
     #[default]
     ServiceList,
     Flamegraph,
+    Timeline,
+    Heatmap,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -293,6 +308,14 @@ pub struct ViewModel {
     pub pyroscope_flamegraph_loading: bool,
     pub pyroscope_flamegraph_error: Option<String>,
     pub flamegraph: Option<FlamegraphView>,
+
+    pub pyroscope_timeline_loading: bool,
+    pub pyroscope_timeline_error: Option<String>,
+    pub timeline: Option<crate::pyroscope::TimelineView>,
+
+    pub pyroscope_heatmap_loading: bool,
+    pub pyroscope_heatmap_error: Option<String>,
+    pub heatmap: Option<crate::pyroscope::HeatmapView>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -507,6 +530,15 @@ impl App for ExploreTui {
             Event::PyroscopeFlamegraphLoaded(result) => {
                 crate::pyroscope::app::handle_pyroscope_flamegraph_loaded(model, result)
             }
+            Event::PyroscopeTimelineLoaded(result) => {
+                crate::pyroscope::app::handle_pyroscope_timeline_loaded(model, result)
+            }
+            Event::PyroscopeHeatmapLoaded(result) => {
+                crate::pyroscope::app::handle_pyroscope_heatmap_loaded(model, result)
+            }
+            Event::PyroscopeCycleView => {
+                crate::pyroscope::app::handle_pyroscope_cycle_view(model)
+            }
             Event::BackToServiceList => crate::pyroscope::app::handle_back_to_service_list(model),
             Event::BackFromPyroscope => crate::pyroscope::app::handle_back_from_pyroscope(model),
             Event::FlameMoveLeft => crate::pyroscope::app::handle_flame_move_left(model),
@@ -587,6 +619,20 @@ impl App for ExploreTui {
         let pyroscope_sub_screen = match model.pyroscope_sub_screen {
             PyroscopeSubScreen::ServiceList => PyroscopeSubScreenView::ServiceList,
             PyroscopeSubScreen::Flamegraph => PyroscopeSubScreenView::Flamegraph,
+            PyroscopeSubScreen::Timeline => PyroscopeSubScreenView::Timeline,
+            PyroscopeSubScreen::Heatmap => PyroscopeSubScreenView::Heatmap,
+        };
+
+        let timeline = if model.pyroscope_timeline.is_empty() {
+            None
+        } else {
+            crate::pyroscope::build_timeline_view(&model.pyroscope_timeline)
+        };
+
+        let heatmap = if model.pyroscope_heatmap.is_empty() {
+            None
+        } else {
+            crate::pyroscope::build_heatmap_view(&model.pyroscope_heatmap)
         };
 
         let pyroscope_filtered = filtered_pyroscope_series_indices(model);
@@ -637,6 +683,12 @@ impl App for ExploreTui {
             pyroscope_flamegraph_loading: model.pyroscope_flamegraph_loading,
             pyroscope_flamegraph_error: model.pyroscope_flamegraph_error.clone(),
             flamegraph,
+            pyroscope_timeline_loading: model.pyroscope_timeline_loading,
+            pyroscope_timeline_error: model.pyroscope_timeline_error.clone(),
+            timeline,
+            pyroscope_heatmap_loading: model.pyroscope_heatmap_loading,
+            pyroscope_heatmap_error: model.pyroscope_heatmap_error.clone(),
+            heatmap,
         }
     }
 }

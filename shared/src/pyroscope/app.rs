@@ -6,6 +6,7 @@ use crate::app::{
     filtered_datasource_indices, filtered_pyroscope_series_indices, Effect, Event, Model,
     PyroscopeSeriesItem, PyroscopeSubScreen, Screen,
 };
+use crate::pyroscope::{HeatmapSlot, TimelinePoint};
 use crate::pyroscope::FlamegraphNav;
 
 pub fn handle_enter_pyroscope(model: &mut Model) -> Command<Effect, Event> {
@@ -175,6 +176,68 @@ pub fn handle_pyroscope_select_series(model: &mut Model) -> Command<Effect, Even
     model.pyroscope_flamegraph_error = None;
     model.pyroscope_flamegraph = None;
     model.flamegraph_nav = FlamegraphNav::default();
+    // Reset other views so stale data isn't shown if the user cycles later.
+    model.pyroscope_timeline_loading = false;
+    model.pyroscope_timeline_error = None;
+    model.pyroscope_timeline.clear();
+    model.pyroscope_heatmap_loading = false;
+    model.pyroscope_heatmap_error = None;
+    model.pyroscope_heatmap.clear();
+    render()
+}
+
+pub fn handle_pyroscope_cycle_view(model: &mut Model) -> Command<Effect, Event> {
+    model.pyroscope_sub_screen = match model.pyroscope_sub_screen {
+        PyroscopeSubScreen::Flamegraph => {
+            // Trigger a timeline load only if we have no data and no error yet.
+            if model.pyroscope_timeline.is_empty() && model.pyroscope_timeline_error.is_none() {
+                model.pyroscope_timeline_loading = true;
+            }
+            PyroscopeSubScreen::Timeline
+        }
+        PyroscopeSubScreen::Timeline => {
+            if model.pyroscope_heatmap.is_empty() && model.pyroscope_heatmap_error.is_none() {
+                model.pyroscope_heatmap_loading = true;
+            }
+            PyroscopeSubScreen::Heatmap
+        }
+        PyroscopeSubScreen::Heatmap => PyroscopeSubScreen::Flamegraph,
+        _ => return render(),
+    };
+    render()
+}
+
+pub fn handle_pyroscope_timeline_loaded(
+    model: &mut Model,
+    result: Result<Vec<TimelinePoint>, String>,
+) -> Command<Effect, Event> {
+    match result {
+        Ok(points) => {
+            model.pyroscope_timeline_loading = false;
+            model.pyroscope_timeline = points;
+        }
+        Err(err) => {
+            model.pyroscope_timeline_loading = false;
+            model.pyroscope_timeline_error = Some(err);
+        }
+    }
+    render()
+}
+
+pub fn handle_pyroscope_heatmap_loaded(
+    model: &mut Model,
+    result: Result<Vec<HeatmapSlot>, String>,
+) -> Command<Effect, Event> {
+    match result {
+        Ok(slots) => {
+            model.pyroscope_heatmap_loading = false;
+            model.pyroscope_heatmap = slots;
+        }
+        Err(err) => {
+            model.pyroscope_heatmap_loading = false;
+            model.pyroscope_heatmap_error = Some(err);
+        }
+    }
     render()
 }
 

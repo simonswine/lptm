@@ -9,3 +9,29 @@ message LabelPair {
 message Labels {
   repeated LabelPair labels = 1;
 }
+
+message Point {
+  double value = 1;
+  int64 timestamp = 2;
+}
+
+message Series {
+  repeated LabelPair labels = 1;
+  repeated Point points = 2;
+}
+
+message HeatmapSlot {
+  int64 timestamp = 1;
+  repeated double y_min = 2;
+  repeated int32 counts = 3;
+}
+
+message HeatmapSeries {
+  repeated LabelPair labels = 1;
+  repeated HeatmapSlot slots = 2;
+}
+
+enum TimeSeriesAggregationType {
+  TIME_SERIES_AGGREGATION_TYPE_SUM = 0;
+  TIME_SERIES_AGGREGATION_TYPE_AVERAGE = 1;
+}

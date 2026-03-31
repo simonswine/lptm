@@ -316,6 +316,104 @@ pub fn build_flamegraph_view(fg: &FlameGraph, nav: &FlamegraphNav) -> Flamegraph
     }
 }
 
+// ── Timeline ──────────────────────────────────────────────────────────────────
+
+/// One data point in a timeline series (raw API data).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TimelinePoint {
+    pub timestamp_ms: i64,
+    pub value: f64,
+}
+
+/// One time slot in a heatmap (raw API data).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HeatmapSlot {
+    pub timestamp_ms: i64,
+    /// Lower y bound of each bucket.
+    pub y_min: Vec<f64>,
+    /// Sample count per bucket.
+    pub counts: Vec<i32>,
+}
+
+/// View model for the timeline chart.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TimelineView {
+    /// Data points as (timestamp_ms as f64, value) — ready for the Chart widget.
+    pub data: Vec<(f64, f64)>,
+    pub value_min: f64,
+    pub value_max: f64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+/// View model for the heatmap.
+/// `columns[time_col][bucket_row]` = normalised intensity in [0, 1].
+/// Row 0 is the highest-value bucket; the last row is the lowest.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HeatmapView {
+    pub columns: Vec<Vec<f64>>,
+    pub n_buckets: usize,
+    pub y_min: f64,
+    pub y_max: f64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+pub fn build_timeline_view(points: &[TimelinePoint]) -> Option<TimelineView> {
+    if points.is_empty() {
+        return None;
+    }
+    let value_min = points.iter().map(|p| p.value).fold(f64::INFINITY, f64::min);
+    let value_max = points.iter().map(|p| p.value).fold(f64::NEG_INFINITY, f64::max);
+    let data = points.iter().map(|p| (p.timestamp_ms as f64, p.value)).collect();
+    Some(TimelineView {
+        data,
+        value_min,
+        value_max,
+        start_ms: points.first().map(|p| p.timestamp_ms).unwrap_or(0),
+        end_ms: points.last().map(|p| p.timestamp_ms).unwrap_or(0),
+    })
+}
+
+pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
+    if slots.is_empty() {
+        return None;
+    }
+    let global_max = slots
+        .iter()
+        .flat_map(|s| s.counts.iter())
+        .copied()
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
+
+    let first = &slots[0];
+    let n_buckets = first.counts.len();
+    let y_min = first.y_min.first().copied().unwrap_or(0.0);
+    let y_max = first.y_min.last().copied().unwrap_or(1.0);
+
+    // Columns: each slot → one column; row 0 = highest bucket.
+    let columns: Vec<Vec<f64>> = slots
+        .iter()
+        .map(|slot| {
+            slot.counts
+                .iter()
+                .rev()
+                .map(|&c| c as f64 / global_max)
+                .collect()
+        })
+        .collect();
+
+    Some(HeatmapView {
+        columns,
+        n_buckets,
+        y_min,
+        y_max,
+        start_ms: slots.first().map(|s| s.timestamp_ms).unwrap_or(0),
+        end_ms: slots.last().map(|s| s.timestamp_ms).unwrap_or(0),
+    })
+}
+
 // ── Time range parser ─────────────────────────────────────────────────────────
 
 /// Parses "15m", "1h", "6h", "24h", "7d" → seconds.
