@@ -1075,10 +1075,10 @@ fn render_history_panel(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         .iter()
         .map(|e| {
             let ds_short = truncate_str(&e.datasource_name, 12);
-            let (type_label, type_color) = if e.datasource_type == "pyroscope" {
-                ("pyro", Color::Magenta)
+            let type_color = if e.datasource_type == "pyroscope" {
+                Color::Magenta
             } else {
-                ("prom", Color::Green)
+                Color::Green
             };
             let line = Line::from(vec![
                 Span::styled(
@@ -1086,7 +1086,7 @@ fn render_history_panel(frame: &mut Frame, vm: &ViewModel, area: Rect) {
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
-                    format!("[{type_label}] "),
+                    format!("[{}] ", e.datasource_type),
                     Style::default().fg(type_color),
                 ),
                 Span::styled(
