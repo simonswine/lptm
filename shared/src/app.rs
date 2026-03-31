@@ -97,6 +97,9 @@ pub enum Event {
 
     // Pyroscope mode
     EnterPyroscope { now_unix_ms: i64 },
+    /// History restore: skip series loading and go directly to the flamegraph
+    /// for a known service + profile_type.
+    PyroscopeDirectLoad { service_name: String, profile_type: String },
 
     PyroscopeSeriesNext,
     PyroscopeSeriesPrev,
@@ -120,6 +123,10 @@ pub enum Event {
     PyroscopeServiceFilterClear,
 
     PyroscopeSelectSeries { now_unix_ms: i64 },
+    /// Restore a history entry: directly set the time-range without triggering a reload.
+    PyroscopeSetTimeRange(String),
+    /// After series are loaded, select the service+profile_type that matches a history entry.
+    PyroscopeSelectByName { service_name: String, profile_type: String },
     PyroscopeFlamegraphLoaded(Result<Option<FlameGraph>, String>),
     PyroscopeTimelineLoaded(Result<Vec<crate::pyroscope::TimelinePoint>, String>),
     PyroscopeHeatmapLoaded(Result<Vec<crate::pyroscope::HeatmapSlot>, String>),
@@ -139,6 +146,15 @@ pub enum Event {
     // Favourites
     FavouritesLoaded(Vec<String>), // datasource UIDs
     ToggleFavourite(String),       // datasource UID
+
+    // History panel (startup screen)
+    HistoryEntriesLoaded(Vec<HistoryEntryView>),
+    HistoryPanelFocus,
+    HistoryPanelBlur,
+    HistorySelectNext,
+    HistorySelectPrev,
+    /// Select a datasource by UID (preferred) with a name fallback for older history entries.
+    SelectDatasource { uid: String, name: String },
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -184,6 +200,10 @@ pub struct Model {
     pub datasource_filter: String,
     pub datasource_filter_focused: bool,
     pub favourites: HashSet<String>, // datasource UIDs
+
+    pub history_entries: Vec<HistoryEntryView>,
+    pub history_panel_focused: bool,
+    pub history_selected_index: usize,
 
     pub screen: Screen,
     pub query: String,
@@ -235,6 +255,22 @@ pub struct Model {
 // ── ViewModel types ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HistoryEntryView {
+    /// The query text: PromQL for Prometheus, "service:profile_type" for Pyroscope.
+    pub query: String,
+    pub datasource_name: String,
+    pub datasource_uid: String,
+    /// Normalised type: "prometheus" or "pyroscope".
+    pub datasource_type: String,
+    /// Human-readable age, e.g. "5m ago".
+    pub time_ago: String,
+    // Pyroscope-specific (empty string for Prometheus entries).
+    pub service_name: String,
+    pub profile_type: String,
+    pub time_range: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DatasourceView {
     pub id: u64,
     pub uid: String,
@@ -277,6 +313,10 @@ pub struct ViewModel {
 
     pub datasource_filter: String,
     pub datasource_filter_focused: bool,
+
+    pub history_entries: Vec<HistoryEntryView>,
+    pub history_panel_focused: bool,
+    pub history_selected_index: usize,
 
     pub screen: ScreenView,
     pub query: String,
@@ -468,6 +508,13 @@ impl App for ExploreTui {
             // ── Pyroscope ─────────────────────────────────────────────────────
 
             Event::EnterPyroscope { .. } => crate::pyroscope::app::handle_enter_pyroscope(model),
+            Event::PyroscopeDirectLoad { service_name, profile_type } => {
+                crate::pyroscope::app::handle_pyroscope_direct_load(
+                    model,
+                    service_name,
+                    profile_type,
+                )
+            }
             Event::PyroscopeSeriesLoaded(result) => {
                 crate::pyroscope::app::handle_pyroscope_series_loaded(model, result)
             }
@@ -527,6 +574,16 @@ impl App for ExploreTui {
             Event::PyroscopeSelectSeries { .. } => {
                 crate::pyroscope::app::handle_pyroscope_select_series(model)
             }
+            Event::PyroscopeSetTimeRange(range) => {
+                crate::pyroscope::app::handle_pyroscope_set_time_range(model, range)
+            }
+            Event::PyroscopeSelectByName { service_name, profile_type } => {
+                crate::pyroscope::app::handle_pyroscope_select_by_name(
+                    model,
+                    service_name,
+                    profile_type,
+                )
+            }
             Event::PyroscopeFlamegraphLoaded(result) => {
                 crate::pyroscope::app::handle_pyroscope_flamegraph_loaded(model, result)
             }
@@ -558,6 +615,69 @@ impl App for ExploreTui {
             Event::ToggleFavourite(uid) => {
                 if !model.favourites.remove(&uid) {
                     model.favourites.insert(uid);
+                }
+                render()
+            }
+
+            Event::HistoryEntriesLoaded(entries) => {
+                model.history_entries = entries;
+                model.history_selected_index = 0;
+                render()
+            }
+
+            Event::HistoryPanelFocus => {
+                model.history_panel_focused = true;
+                model.datasource_filter_focused = false;
+                render()
+            }
+
+            Event::HistoryPanelBlur => {
+                model.history_panel_focused = false;
+                render()
+            }
+
+            Event::HistorySelectNext => {
+                let len = model.history_entries.len();
+                if len > 0 {
+                    model.history_selected_index = (model.history_selected_index + 1) % len;
+                }
+                render()
+            }
+
+            Event::HistorySelectPrev => {
+                let len = model.history_entries.len();
+                if len > 0 {
+                    model.history_selected_index =
+                        (model.history_selected_index + len - 1) % len;
+                }
+                render()
+            }
+
+            Event::SelectDatasource { uid, name } => {
+                model.datasource_filter.clear();
+                model.datasource_filter_focused = false;
+                model.history_panel_focused = false;
+                // Try by UID first; fall back to name for older history entries that lack a uid.
+                // Find the raw index first, then convert to the sorted position that view() uses,
+                // so that model.selected_index always reflects the sorted display order.
+                let raw_pos = if !uid.is_empty() {
+                    model.datasources.iter().position(|ds| ds.uid == uid)
+                } else {
+                    None
+                }
+                .or_else(|| {
+                    if !name.is_empty() {
+                        model.datasources.iter().position(|ds| ds.name == name)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(raw) = raw_pos {
+                    // sorted_datasource_indices is computed after the filter is cleared above.
+                    let sorted = sorted_datasource_indices(model);
+                    if let Some(sorted_pos) = sorted.iter().position(|&i| i == raw) {
+                        model.selected_index = sorted_pos;
+                    }
                 }
                 render()
             }
@@ -649,9 +769,18 @@ impl App for ExploreTui {
             })
             .collect();
 
+        let history_selected_index = if model.history_entries.is_empty() {
+            0
+        } else {
+            model.history_selected_index.min(model.history_entries.len() - 1)
+        };
+
         ViewModel {
             datasource_filter: model.datasource_filter.clone(),
             datasource_filter_focused: model.datasource_filter_focused,
+            history_entries: model.history_entries.clone(),
+            history_panel_focused: model.history_panel_focused,
+            history_selected_index,
             datasources,
             loading: model.loading,
             error: model.error.clone(),
@@ -748,6 +877,22 @@ pub(crate) fn filtered_datasource_indices(model: &Model) -> Vec<usize> {
         .filter(|(_, ds)| fuzzy_match(&ds.name, &model.datasource_filter))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Returns filtered datasource indices sorted with favourites first, matching
+/// the order used by `view()` to build `ViewModel::datasources`.
+pub(crate) fn sorted_datasource_indices(model: &Model) -> Vec<usize> {
+    let mut indices = filtered_datasource_indices(model);
+    indices.sort_by_key(|&i| {
+        if model.favourites.contains(&model.datasources[i].uid) { 0u8 } else { 1u8 }
+    });
+    indices
+}
+
+/// Returns the datasource that `model.selected_index` (a sorted position) points to.
+pub(crate) fn active_datasource(model: &Model) -> Option<&Datasource> {
+    let raw = *sorted_datasource_indices(model).get(model.selected_index)?;
+    model.datasources.get(raw)
 }
 
 // ── Utility helpers ───────────────────────────────────────────────────────────
@@ -1209,5 +1354,140 @@ mod tests {
         let vm = core.view();
         assert_ne!(vm.query, "ra", "query should be updated after accept");
         assert!(!vm.query.starts_with("ra") || vm.query.len() > 2);
+    }
+
+    // Helper: extract HTTP request URLs from a list of effects.
+    fn http_urls(effects: &[Effect]) -> Vec<String> {
+        effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::Http(req) = e {
+                    Some(req.operation.url.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pyroscope_history_restore_sets_expected_state() {
+        // Simulate restoring a pyroscope history entry via the direct-load path.
+        // Expected outcome:
+        //   - datasource: Pyroscope (id=4, uid=uid4)
+        //   - time range: "2h" (from history, not the default "1h")
+        //   - selected service: "my-svc"
+        //   - selected profile type: "process_cpu:cpu:nanoseconds:cpu:nanoseconds"
+        //   - sub-screen: Flamegraph (no series load required)
+        let core = make_core();
+        core.process_event(Event::Configure {
+            url: "http://grafana".into(),
+            token: "tok".into(),
+        });
+        let resp = ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        core.process_event(Event::DatasourcesLoaded(Ok(resp)));
+
+        // Step 1: select the right datasource
+        core.process_event(Event::SelectDatasource {
+            uid: "uid4".into(),
+            name: "Pyroscope".into(),
+        });
+
+        // Step 2: restore the stored time range
+        core.process_event(Event::PyroscopeSetTimeRange("2h".into()));
+
+        // Step 3: jump directly to flamegraph — no series fetch needed
+        core.process_event(Event::PyroscopeDirectLoad {
+            service_name: "my-svc".into(),
+            profile_type: "process_cpu:cpu:nanoseconds:cpu:nanoseconds".into(),
+        });
+
+        let vm = core.view();
+        // Correct datasource active
+        assert_eq!(vm.datasources[vm.selected_index].uid, "uid4");
+        assert_eq!(vm.datasources[vm.selected_index].id, 4);
+        // Time range from history preserved
+        assert_eq!(vm.pyroscope_time_range, "2h");
+        // Landed directly on Flamegraph sub-screen
+        assert_eq!(vm.pyroscope_sub_screen, PyroscopeSubScreenView::Flamegraph);
+        // Flamegraph is loading (TUI will spawn the fetch)
+        assert!(vm.pyroscope_flamegraph_loading);
+        // Series are NOT loading
+        assert!(!vm.pyroscope_series_loading);
+        // Correct service and profile type
+        assert_eq!(vm.pyroscope_selected_service, "my-svc");
+        assert_eq!(
+            vm.pyroscope_selected_profile_type,
+            "process_cpu:cpu:nanoseconds:cpu:nanoseconds"
+        );
+    }
+
+    #[test]
+    fn select_datasource_by_uid_uses_correct_ds_despite_favourites() {
+        // Regression: when a favourite reorders the sorted view, restoring a
+        // history entry by UID must still fire HTTP requests to the correct
+        // datasource, not to whichever datasource happens to sit at the same
+        // *sorted* position.
+        //
+        // Setup: after filtering, model.datasources = [prom1(id=1), prom2(id=3)].
+        // prom2 (uid3) is marked as favourite → sorted view = [prom2, prom1].
+        // SelectDatasource { uid: "uid1" } targets prom1 (raw index 0).
+        // EnterQuery must produce HTTP requests to /proxy/1/…, not /proxy/3/…
+        let core = make_core();
+        core.process_event(Event::Configure {
+            url: "http://grafana".into(),
+            token: "tok".into(),
+        });
+        let response = ResponseBuilder::ok().body(make_datasources()).build();
+        core.process_event(Event::DatasourcesLoaded(Ok(response)));
+        // Make prom2 the favourite — it now appears first in the sorted view.
+        core.process_event(Event::FavouritesLoaded(vec!["uid3".into()]));
+
+        core.process_event(Event::SelectDatasource {
+            uid: "uid1".into(),
+            name: "Prometheus".into(),
+        });
+        let urls = http_urls(&core.process_event(Event::EnterQuery));
+
+        assert!(
+            urls.iter().any(|u| u.contains("/proxy/1/")),
+            "expected requests to prom1 (id=1), got: {urls:?}"
+        );
+        assert!(
+            urls.iter().all(|u| !u.contains("/proxy/3/")),
+            "must not query prom2 (id=3), got: {urls:?}"
+        );
+    }
+
+    #[test]
+    fn select_datasource_name_fallback_for_empty_uid() {
+        // Regression: history entries written before uid tracking was added have
+        // an empty datasource_uid.  SelectDatasource must fall back to name
+        // matching so the correct datasource is used.
+        //
+        // The cursor starts on prom1 (index 0).  We request prom2 by name with
+        // an empty uid.  EnterQuery must target prom2 (id=3).
+        let core = make_core();
+        core.process_event(Event::Configure {
+            url: "http://grafana".into(),
+            token: "tok".into(),
+        });
+        let response = ResponseBuilder::ok().body(make_datasources()).build();
+        core.process_event(Event::DatasourcesLoaded(Ok(response)));
+
+        core.process_event(Event::SelectDatasource {
+            uid: String::new(), // empty – simulates a pre-uid history entry
+            name: "Prometheus2".into(),
+        });
+        let urls = http_urls(&core.process_event(Event::EnterQuery));
+
+        assert!(
+            urls.iter().any(|u| u.contains("/proxy/3/")),
+            "expected prom2 (id=3) via name fallback, got: {urls:?}"
+        );
+        assert!(
+            urls.iter().all(|u| !u.contains("/proxy/1/")),
+            "must not query prom1 (id=1), got: {urls:?}"
+        );
     }
 }

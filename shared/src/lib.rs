@@ -3,7 +3,7 @@ pub mod prometheus;
 pub mod pyroscope;
 
 pub use app::{
-    Datasource, DatasourceView, Effect, Event, ExploreTui, Model,
+    Datasource, DatasourceView, Effect, Event, ExploreTui, HistoryEntryView, Model,
     PyroscopeSubScreenView, QueryResultsView, ScreenView, ViewModel,
 };
 pub use pyroscope::{FlamegraphFrameView, FlamegraphLevelView, FlamegraphView};

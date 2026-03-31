@@ -1,7 +1,7 @@
 use crux_core::{render::render, Command};
 use crux_http::command::Http;
 
-use crate::app::{extract_error_message, filtered_datasource_indices, Effect, Event, Model, Screen};
+use crate::app::{active_datasource, extract_error_message, sorted_datasource_indices, Effect, Event, Model, Screen};
 use crate::prometheus::{
     context::{char_to_byte, compute_completions, detect_context, word_boundary_byte},
     types::{PrometheusData, PrometheusResponse, PrometheusStringListResponse},
@@ -9,12 +9,16 @@ use crate::prometheus::{
 };
 
 pub fn handle_enter_query(model: &mut Model) -> Command<Effect, Event> {
-    let indices = filtered_datasource_indices(model);
+    // Use the favorites-sorted indices (same order as view()) so that
+    // model.selected_index — which is always a *sorted* position — translates
+    // correctly to the datasource the user actually has highlighted.
+    let indices = sorted_datasource_indices(model);
     if indices.is_empty() {
         return render();
     }
-    let abs_idx = indices[model.selected_index.min(indices.len() - 1)];
-    model.selected_index = abs_idx;
+    // Clamp to valid range; do NOT overwrite selected_index — it remains the
+    // sorted position and is used as such by view() and the TUI.
+    model.selected_index = model.selected_index.min(indices.len() - 1);
     model.datasource_filter.clear();
 
     model.screen = Screen::QueryMode;
@@ -33,7 +37,7 @@ pub fn handle_enter_query(model: &mut Model) -> Command<Effect, Event> {
         return render();
     }
 
-    let ds = &model.datasources[model.selected_index];
+    let ds = active_datasource(model).expect("selected datasource must exist after entering query mode");
     let base = format!("{}/api/datasources/proxy/{}", model.grafana_url, ds.id);
     let token = model.grafana_token.clone();
 
@@ -246,7 +250,7 @@ pub fn handle_execute_query(model: &mut Model) -> Command<Effect, Event> {
     model.completion_dismissed = true;
     model.completion_index = None;
 
-    let ds = &model.datasources[model.selected_index];
+    let ds = active_datasource(model).expect("selected datasource must exist in query mode");
     let url = format!(
         "{}/api/datasources/proxy/{}/api/v1/query?query={}",
         model.grafana_url,
@@ -322,7 +326,7 @@ pub fn get_completions(model: &Model) -> Vec<String> {
 }
 
 fn maybe_label_names_cmd(model: &Model) -> Option<Command<Effect, Event>> {
-    let ds_id = model.datasources.get(model.selected_index)?.id;
+    let ds_id = active_datasource(model)?.id;
     let ctx = detect_context(&model.query, model.cursor_pos);
 
     if let CompletionCtx::LabelName { ref selector, .. } = ctx {
@@ -352,7 +356,7 @@ fn maybe_label_names_cmd(model: &Model) -> Option<Command<Effect, Event>> {
 }
 
 fn maybe_label_values_cmd(model: &Model) -> Option<Command<Effect, Event>> {
-    let ds_id = model.datasources.get(model.selected_index)?.id;
+    let ds_id = active_datasource(model)?.id;
     let ctx = detect_context(&model.query, model.cursor_pos);
 
     if let CompletionCtx::LabelValue { ref label, ref selector, .. } = ctx {

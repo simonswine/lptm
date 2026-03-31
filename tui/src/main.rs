@@ -14,15 +14,15 @@ use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers};
 use futures::StreamExt;
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Cell, Paragraph, Row, Table, TableState,
+        Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState,
     },
     DefaultTerminal, Frame,
 };
-use shared::{Event, PyroscopeSubScreenView, ScreenView, ViewModel};
+use shared::{Event, HistoryEntryView, PyroscopeSubScreenView, ScreenView, ViewModel};
 use tokio::{sync::mpsc, time::Instant};
 
 use crate::core::AppCore;
@@ -97,10 +97,19 @@ struct HistoryEntry {
     query: String,
     datasource_name: String,
     datasource_type: String,
+    #[serde(default)]
+    datasource_uid: String,
     grafana_url_hash: String,
     /// Unix timestamp (seconds since epoch) when the query was executed.
     #[serde(default)]
     timestamp: u64,
+    // Pyroscope-specific (absent for Prometheus entries).
+    #[serde(default)]
+    service_name: Option<String>,
+    #[serde(default)]
+    profile_type: Option<String>,
+    #[serde(default)]
+    time_range: Option<String>,
 }
 
 fn now_unix_secs() -> u64 {
@@ -108,6 +117,38 @@ fn now_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn format_time_ago(ts: u64) -> String {
+    let now = now_unix_secs();
+    let secs = now.saturating_sub(ts);
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
+fn history_views(all: &[HistoryEntry], url_hash: &str) -> Vec<HistoryEntryView> {
+    all.iter()
+        .rev()
+        .filter(|e| e.grafana_url_hash == url_hash)
+        .take(100)
+        .map(|e| HistoryEntryView {
+            query: e.query.clone(),
+            datasource_name: e.datasource_name.clone(),
+            datasource_uid: e.datasource_uid.clone(),
+            datasource_type: e.datasource_type.clone(),
+            time_ago: format_time_ago(e.timestamp),
+            service_name: e.service_name.clone().unwrap_or_default(),
+            profile_type: e.profile_type.clone().unwrap_or_default(),
+            time_range: e.time_range.clone().unwrap_or_default(),
+        })
+        .collect()
 }
 
 /// FNV-1a hash of a URL — stable, no extra dependencies.
@@ -188,6 +229,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
     let mut reader = EventStream::new();
 
     let mut all_history = load_history();
+    app_core.update(Event::HistoryEntriesLoaded(history_views(&all_history, &url_hash)));
     let mut history: Vec<String> = vec![];
     let mut history_pos: Option<usize> = None;
     let mut history_saved_query = String::new();
@@ -236,12 +278,135 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         break;
                                     }
                                     (KeyCode::Esc, _) => {
-                                        if vm.datasource_filter_focused
+                                        if vm.history_panel_focused {
+                                            app_core.update(Event::HistoryPanelBlur);
+                                        } else if vm.datasource_filter_focused
                                             || !vm.datasource_filter.is_empty()
                                         {
                                             app_core.update(Event::DatasourceFilterClear);
                                         } else {
                                             break;
+                                        }
+                                    }
+                                    // ── History panel toggle ─────────────────
+                                    (KeyCode::Tab, _) => {
+                                        if vm.history_panel_focused {
+                                            app_core.update(Event::HistoryPanelBlur);
+                                        } else {
+                                            app_core.update(Event::HistoryPanelFocus);
+                                        }
+                                    }
+                                    // ── History panel navigation ─────────────
+                                    _ if vm.history_panel_focused => {
+                                        match key.code {
+                                            KeyCode::Char('j') | KeyCode::Down => {
+                                                app_core.update(Event::HistorySelectNext);
+                                            }
+                                            KeyCode::Char('k') | KeyCode::Up => {
+                                                app_core.update(Event::HistorySelectPrev);
+                                            }
+                                            KeyCode::Enter => {
+                                                let vm2 = app_core.core.view();
+                                                if let Some(entry) = vm2
+                                                    .history_entries
+                                                    .get(vm2.history_selected_index)
+                                                    .cloned()
+                                                {
+                                                    // SelectDatasource clears any active
+                                                    // datasource filter, so the full list is
+                                                    // available in the view() taken afterwards.
+                                                    app_core.update(Event::SelectDatasource {
+                                                        uid: entry.datasource_uid.clone(),
+                                                        name: entry.datasource_name.clone(),
+                                                    });
+                                                    if entry.datasource_type == "pyroscope" {
+                                                        let now = now_unix_secs() as i64 * 1000;
+                                                        if !entry.time_range.is_empty() {
+                                                            app_core.update(Event::PyroscopeSetTimeRange(
+                                                                entry.time_range.clone(),
+                                                            ));
+                                                        }
+                                                        if !entry.service_name.is_empty()
+                                                            && !entry.profile_type.is_empty()
+                                                        {
+                                                            // We know exactly what to load — skip
+                                                            // the series fetch and go straight to
+                                                            // the flamegraph.
+                                                            app_core.update(Event::PyroscopeDirectLoad {
+                                                                service_name: entry.service_name.clone(),
+                                                                profile_type: entry.profile_type.clone(),
+                                                            });
+                                                        } else {
+                                                            // Old history entry without
+                                                            // service/profile — fall back to series
+                                                            // list.
+                                                            app_core.update(Event::EnterPyroscope {
+                                                                now_unix_ms: now,
+                                                            });
+                                                        }
+                                                        // Look up the datasource after events
+                                                        // (filter is cleared by now).
+                                                        let vm3 = app_core.core.view();
+                                                        let ds = vm3.datasources.iter().find(|d| {
+                                                            (!entry.datasource_uid.is_empty()
+                                                                && d.uid == entry.datasource_uid)
+                                                                || (entry.datasource_uid.is_empty()
+                                                                    && d.name
+                                                                        == entry.datasource_name)
+                                                        }).cloned();
+                                                        if let Some(ds) = ds {
+                                                            if !entry.service_name.is_empty()
+                                                                && !entry.profile_type.is_empty()
+                                                            {
+                                                                if let Ok(size) = terminal.size() {
+                                                                    app_core.update(Event::FlamegraphViewportChars(
+                                                                        size.width.saturating_sub(2) as u64,
+                                                                    ));
+                                                                }
+                                                                spawn_flamegraph_fetch(
+                                                                    &pyroscope_tx,
+                                                                    grafana_url.clone(),
+                                                                    ds.id,
+                                                                    grafana_token.clone(),
+                                                                    entry.profile_type.clone(),
+                                                                    entry.service_name.clone(),
+                                                                    vm3.pyroscope_time_range.clone(),
+                                                                    now,
+                                                                );
+                                                            } else {
+                                                                spawn_series_fetch(
+                                                                    &pyroscope_tx,
+                                                                    grafana_url.clone(),
+                                                                    ds.id,
+                                                                    grafana_token.clone(),
+                                                                    vm3.pyroscope_time_range.clone(),
+                                                                    now,
+                                                                );
+                                                            }
+                                                        }
+                                                    } else {
+                                                        // Prometheus: enter query mode with
+                                                        // the historical query pre-filled.
+                                                        history_pos = None;
+                                                        history = all_history
+                                                            .iter()
+                                                            .filter(|e| {
+                                                                e.grafana_url_hash == url_hash
+                                                                    && e.datasource_name
+                                                                        == entry.datasource_name
+                                                                    && e.datasource_type
+                                                                        == entry.datasource_type
+                                                            })
+                                                            .map(|e| e.query.clone())
+                                                            .collect();
+                                                        app_core.update(Event::EnterQuery);
+                                                        app_core.update(Event::HistoryNavigate(
+                                                            entry.query.clone(),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                     // ── Filter focused mode ──────────────────
@@ -389,13 +554,20 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                     let entry = HistoryEntry {
                                                         query: query.clone(),
                                                         datasource_name: ds.name.clone(),
+                                                        datasource_uid: ds.uid.clone(),
                                                         datasource_type: ds.ds_type.clone(),
                                                         grafana_url_hash: url_hash.clone(),
                                                         timestamp: now_unix_secs(),
+                                                        service_name: None,
+                                                        profile_type: None,
+                                                        time_range: None,
                                                     };
                                                     history.push(query.clone());
                                                     append_history(&entry);
                                                     all_history.push(entry);
+                                                    app_core.update(Event::HistoryEntriesLoaded(
+                                                        history_views(&all_history, &url_hash),
+                                                    ));
                                                 }
                                             }
                                         }
@@ -530,8 +702,30 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                     let selected = vm.pyroscope_series
                                                         .get(vm.pyroscope_series_index)
                                                         .cloned();
-                                                    let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
+                                                    let ds = vm.datasources.get(vm.selected_index).cloned();
+                                                    let ds_id = ds.as_ref().map(|d| d.id);
                                                     let time_range = vm.pyroscope_time_range.clone();
+
+                                                    // Record history for Pyroscope selection.
+                                                    if let (Some((ref service, ref pt)), Some(ref ds)) = (&selected, &ds) {
+                                                        let entry = HistoryEntry {
+                                                            query: format!("{}:{}", service, pt),
+                                                            datasource_name: ds.name.clone(),
+                                                            datasource_uid: ds.uid.clone(),
+                                                            datasource_type: ds.ds_type.clone(),
+                                                            grafana_url_hash: url_hash.clone(),
+                                                            timestamp: now_unix_secs(),
+                                                            service_name: Some(service.clone()),
+                                                            profile_type: Some(pt.clone()),
+                                                            time_range: Some(time_range.clone()),
+                                                        };
+                                                        append_history(&entry);
+                                                        all_history.push(entry);
+                                                        app_core.update(Event::HistoryEntriesLoaded(
+                                                            history_views(&all_history, &url_hash),
+                                                        ));
+                                                    }
+
                                                     app_core.update(Event::PyroscopeSelectSeries { now_unix_ms: now });
                                                     if let Ok(size) = terminal.size() {
                                                         app_core.update(Event::FlamegraphViewportChars(size.width.saturating_sub(2) as u64));
@@ -556,7 +750,16 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     PyroscopeSubScreenView::Flamegraph => {
                                         match key.code {
                                             KeyCode::Esc | KeyCode::Char('q') => {
+                                                let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
+                                                let time_range = vm.pyroscope_time_range.clone();
+                                                let now = now_unix_secs() as i64 * 1000;
                                                 app_core.update(Event::BackToServiceList);
+                                                let vm2 = app_core.core.view();
+                                                if vm2.pyroscope_series_loading {
+                                                    if let Some(ds_id) = ds_id {
+                                                        spawn_series_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), time_range, now);
+                                                    }
+                                                }
                                             }
                                             KeyCode::Tab => {
                                                 let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
@@ -598,7 +801,16 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     | PyroscopeSubScreenView::Heatmap => {
                                         match key.code {
                                             KeyCode::Esc | KeyCode::Char('q') => {
+                                                let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
+                                                let time_range = vm.pyroscope_time_range.clone();
+                                                let now = now_unix_secs() as i64 * 1000;
                                                 app_core.update(Event::BackToServiceList);
+                                                let vm2 = app_core.core.view();
+                                                if vm2.pyroscope_series_loading {
+                                                    if let Some(ds_id) = ds_id {
+                                                        spawn_series_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), time_range, now);
+                                                    }
+                                                }
                                             }
                                             KeyCode::Tab => {
                                                 let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
@@ -647,7 +859,7 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
 
     let footer_text = match vm.screen {
         ScreenView::DatasourceList => {
-            "Esc: Quit/Clear  j/↓: Next  k/↑: Prev  Enter: Select  f: Favourite  /: Filter"
+            "Esc: Quit/Clear  j/k: Next/Prev  Enter: Select  f: Fav  /: Filter  Tab: History"
         }
         ScreenView::QueryMode => {
             "Ctrl+C: Quit  Esc: Back  Enter: Execute  Tab: Complete  ↓/↑: History/Select  ←/→: Cursor"
@@ -698,9 +910,27 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
 }
 
 fn render_datasource_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let (ds_area, hist_area) = (chunks[0], chunks[1]);
+
+    render_datasource_list_panel(frame, vm, ds_area);
+    render_history_panel(frame, vm, hist_area);
+}
+
+fn render_datasource_list_panel(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+    let dim = vm.history_panel_focused;
+    let border_style = if dim {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
     let body_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Datasources ");
+        .title(" Datasources ")
+        .border_style(border_style);
 
     if vm.loading {
         let loading = Paragraph::new("Loading datasources…").block(body_block);
@@ -775,18 +1005,23 @@ fn render_datasource_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         .map(|ds| {
             let fav = if ds.is_favourite { "★ " } else { "  " };
             let default_tag = if ds.is_default { " [default]" } else { "" };
+            let type_color = match ds.ds_type.as_str() {
+                "pyroscope" => Color::Magenta,
+                "prometheus" => Color::Green,
+                _ => Color::DarkGray,
+            };
             Row::new(vec![
                 Cell::from(format!("{}{}{}", fav, ds.name, default_tag)),
-                Cell::from(ds.ds_type.clone()),
+                Cell::from(ds.ds_type.clone()).style(Style::default().fg(type_color)),
                 Cell::from(ds.url.clone()),
             ])
         })
         .collect();
 
     let widths = [
-        Constraint::Percentage(30),
+        Constraint::Percentage(40),
         Constraint::Percentage(20),
-        Constraint::Percentage(50),
+        Constraint::Percentage(40),
     ];
 
     let table = Table::new(rows, widths)
@@ -802,6 +1037,75 @@ fn render_datasource_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     table_state.select(Some(vm.selected_index));
 
     frame.render_stateful_widget(table, list_area, &mut table_state);
+}
+
+fn render_history_panel(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+    let focused = vm.history_panel_focused;
+    let border_style = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" History ")
+        .border_style(border_style);
+
+    if vm.history_entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No history yet.\nStart querying datasources.")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = vm
+        .history_entries
+        .iter()
+        .map(|e| {
+            let ds_short = truncate_str(&e.datasource_name, 12);
+            let (type_label, type_color) = if e.datasource_type == "pyroscope" {
+                ("pyro", Color::Magenta)
+            } else {
+                ("prom", Color::Green)
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("{:>9}  ", e.time_ago),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("[{type_label}] "),
+                    Style::default().fg(type_color),
+                ),
+                Span::styled(
+                    format!("{:<12}  ", ds_short),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(e.query.clone()),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_symbol(">> ")
+        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(vm.history_selected_index));
+
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn truncate_str(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        None => s,
+        Some((idx, _)) => &s[..idx],
+    }
 }
 
 fn render_datasource_bar(frame: &mut Frame, vm: &ViewModel, area: Rect) {

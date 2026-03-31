@@ -3,19 +3,23 @@ use std::collections::BTreeSet;
 use crux_core::{render::render, Command};
 
 use crate::app::{
-    filtered_datasource_indices, filtered_pyroscope_series_indices, Effect, Event, Model,
+    filtered_pyroscope_series_indices, sorted_datasource_indices, Effect, Event, Model,
     PyroscopeSeriesItem, PyroscopeSubScreen, Screen,
 };
 use crate::pyroscope::{HeatmapSlot, TimelinePoint};
 use crate::pyroscope::FlamegraphNav;
 
 pub fn handle_enter_pyroscope(model: &mut Model) -> Command<Effect, Event> {
-    let indices = filtered_datasource_indices(model);
+    // Use the favorites-sorted indices (same order as view()) so that
+    // model.selected_index — which is always a *sorted* position — translates
+    // correctly to the datasource the user actually has highlighted.
+    let indices = sorted_datasource_indices(model);
     if indices.is_empty() {
         return render();
     }
-    let abs_idx = indices[model.selected_index.min(indices.len() - 1)];
-    model.selected_index = abs_idx;
+    // Clamp to valid range; do NOT overwrite selected_index — it remains the
+    // sorted position and is used as such by view() and the TUI.
+    model.selected_index = model.selected_index.min(indices.len() - 1);
     model.datasource_filter.clear();
 
     model.screen = Screen::PyroscopeMode;
@@ -60,14 +64,21 @@ pub fn handle_pyroscope_series_loaded(
                 .into_iter()
                 .collect();
 
-            // On first entry (profile_types was empty) prefer the cpu profile type.
+            // On first entry (profile_types was empty) prefer a CPU profile type.
             // On reload (time range change) preserve the current selection, just clamp.
             if was_empty {
-                let preferred = "cpu:cpu:nanoseconds:cpu:nanoseconds";
+                // Try known CPU profile type IDs in priority order, then fall back
+                // to any type whose first segment is a CPU variant, then to index 0.
                 model.pyroscope_profile_type_index = model
                     .pyroscope_profile_types
                     .iter()
-                    .position(|pt| pt == preferred)
+                    .position(|pt| pt == "process_cpu:cpu:nanoseconds:cpu:nanoseconds")
+                    .or_else(|| {
+                        model.pyroscope_profile_types.iter().position(|pt| {
+                            let seg = pt.split(':').next().unwrap_or("");
+                            seg == "process_cpu" || seg == "cpu"
+                        })
+                    })
                     .unwrap_or(0);
             } else if model.pyroscope_profile_type_index >= model.pyroscope_profile_types.len() {
                 model.pyroscope_profile_type_index = 0;
@@ -263,8 +274,98 @@ pub fn handle_pyroscope_flamegraph_loaded(
     }
 }
 
+/// History restore: enter PyroscopeMode and jump directly to the Flamegraph
+/// sub-screen for `service_name` + `profile_type`, skipping series loading.
+pub fn handle_pyroscope_direct_load(
+    model: &mut Model,
+    service_name: String,
+    profile_type: String,
+) -> Command<Effect, Event> {
+    let indices = sorted_datasource_indices(model);
+    if indices.is_empty() {
+        return render();
+    }
+    model.selected_index = model.selected_index.min(indices.len() - 1);
+    model.datasource_filter.clear();
+
+    model.screen = Screen::PyroscopeMode;
+    if model.pyroscope_time_range.is_empty() {
+        model.pyroscope_time_range = "1h".into();
+    }
+
+    // Series are not needed — we already know what to load.
+    model.pyroscope_series_loading = false;
+    model.pyroscope_series_error = None;
+    model.pyroscope_series.clear();
+    model.pyroscope_profile_types.clear();
+    model.pyroscope_series_index = 0;
+    model.pyroscope_service_filter.clear();
+
+    // Go directly to the flamegraph for the stored selection.
+    model.pyroscope_selected_service = service_name;
+    model.pyroscope_selected_profile_type = profile_type;
+    model.pyroscope_sub_screen = PyroscopeSubScreen::Flamegraph;
+    model.pyroscope_flamegraph_loading = true;
+    model.pyroscope_flamegraph_error = None;
+    model.pyroscope_flamegraph = None;
+    model.flamegraph_nav = FlamegraphNav::default();
+    model.pyroscope_timeline_loading = false;
+    model.pyroscope_timeline_error = None;
+    model.pyroscope_timeline.clear();
+    model.pyroscope_heatmap_loading = false;
+    model.pyroscope_heatmap_error = None;
+    model.pyroscope_heatmap.clear();
+
+    render()
+}
+
+/// Set the time range directly without triggering a series reload.
+/// Used when restoring a pyroscope history entry so EnterPyroscope preserves
+/// the stored time range rather than defaulting to "1h".
+pub fn handle_pyroscope_set_time_range(
+    model: &mut Model,
+    range: String,
+) -> Command<Effect, Event> {
+    model.pyroscope_time_range = range;
+    render()
+}
+
+/// After a series load, select the service + profile_type matching a history entry.
+/// Finds the right profile_type_index and series_index then delegates to the
+/// normal select-series logic (which navigates to the Flamegraph sub-screen).
+pub fn handle_pyroscope_select_by_name(
+    model: &mut Model,
+    service_name: String,
+    profile_type: String,
+) -> Command<Effect, Event> {
+    let Some(pt_idx) = model
+        .pyroscope_profile_types
+        .iter()
+        .position(|pt| *pt == profile_type)
+    else {
+        return render();
+    };
+    model.pyroscope_profile_type_index = pt_idx;
+
+    let indices = filtered_pyroscope_series_indices(model);
+    if let Some(series_idx) = indices
+        .iter()
+        .position(|&abs_i| model.pyroscope_series[abs_i].service_name == service_name)
+    {
+        model.pyroscope_series_index = series_idx;
+    }
+
+    handle_pyroscope_select_series(model)
+}
+
 pub fn handle_back_to_service_list(model: &mut Model) -> Command<Effect, Event> {
     model.pyroscope_sub_screen = PyroscopeSubScreen::ServiceList;
+    // When arriving via PyroscopeDirectLoad the series were never fetched.
+    // Trigger a load now so the service list is populated.
+    if model.pyroscope_series.is_empty() && !model.pyroscope_series_loading {
+        model.pyroscope_series_loading = true;
+        model.pyroscope_series_error = None;
+    }
     render()
 }
 
