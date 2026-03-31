@@ -462,11 +462,32 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         } else {
                                             match key.code {
                                                 KeyCode::Esc => {
-                                                    if !vm.pyroscope_service_filter.is_empty() {
+                                                    if vm.pyroscope_service_filter_focused
+                                                        || !vm.pyroscope_service_filter.is_empty()
+                                                    {
                                                         app_core.update(Event::PyroscopeServiceFilterClear);
                                                     } else {
                                                         app_core.update(Event::BackFromPyroscope);
                                                     }
+                                                }
+                                                // ── Filter focused mode ──────────────
+                                                _ if vm.pyroscope_service_filter_focused => {
+                                                    match key.code {
+                                                        KeyCode::Enter => {
+                                                            app_core.update(Event::PyroscopeServiceFilterBlur);
+                                                        }
+                                                        KeyCode::Backspace => {
+                                                            app_core.update(Event::PyroscopeServiceFilterBackspace);
+                                                        }
+                                                        KeyCode::Char(c) => {
+                                                            app_core.update(Event::PyroscopeServiceFilterInput(c));
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                                // ── Navigation mode ──────────────────
+                                                KeyCode::Char('/') => {
+                                                    app_core.update(Event::PyroscopeServiceFilterFocus);
                                                 }
                                                 KeyCode::Char('j') | KeyCode::Down => {
                                                     app_core.update(Event::PyroscopeSeriesNext);
@@ -482,9 +503,6 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 }
                                                 KeyCode::Char(']') => {
                                                     app_core.update(Event::PyroscopeProfileTypeNext);
-                                                }
-                                                KeyCode::Backspace => {
-                                                    app_core.update(Event::PyroscopeServiceFilterBackspace);
                                                 }
                                                 KeyCode::Enter => {
                                                     let now = now_unix_secs() as i64 * 1000;
@@ -510,9 +528,6 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                             now,
                                                         );
                                                     }
-                                                }
-                                                KeyCode::Char(c) => {
-                                                    app_core.update(Event::PyroscopeServiceFilterInput(c));
                                                 }
                                                 _ => {}
                                             }
@@ -583,7 +598,7 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
                 "Esc: Cancel  Enter: Apply"
             }
             PyroscopeSubScreenView::ServiceList => {
-                "Esc: Back/Clear  j/k: Next/Prev  Enter: Select  t: Time Range  [/]: Profile Type  Type: Filter"
+                "Esc: Back/Clear  j/k: Next/Prev  Enter: Select  t: Time Range  [/]: Profile Type  /: Filter"
             }
             PyroscopeSubScreenView::Flamegraph => {
                 "Esc: List  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller  Enter/z: Zoom In  o: Zoom Out"

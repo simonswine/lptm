@@ -68,13 +68,22 @@ fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) 
     let list_area = split[1];
 
     // Filter line (like datasource page)
-    let filter_line = if vm.pyroscope_service_filter.is_empty() {
-        Line::from(Span::styled("/ type to filter…", Style::default().fg(Color::DarkGray)))
+    let filter_line = if vm.pyroscope_service_filter_focused {
+        if vm.pyroscope_service_filter.is_empty() {
+            Line::from(Span::styled("/ type to filter…", Style::default().fg(Color::DarkGray)))
+        } else {
+            Line::from(vec![
+                Span::styled("/ ", Style::default().fg(Color::DarkGray)),
+                Span::raw(vm.pyroscope_service_filter.clone()),
+                Span::styled("_", Style::default().fg(Color::Yellow)),
+            ])
+        }
+    } else if vm.pyroscope_service_filter.is_empty() {
+        Line::from(Span::styled("/ to filter", Style::default().fg(Color::DarkGray)))
     } else {
         Line::from(vec![
             Span::styled("/ ", Style::default().fg(Color::DarkGray)),
             Span::raw(vm.pyroscope_service_filter.clone()),
-            Span::styled("_", Style::default().fg(Color::Yellow)),
         ])
     };
     frame.render_widget(Paragraph::new(filter_line), filter_area);

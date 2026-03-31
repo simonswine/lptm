@@ -111,6 +111,8 @@ pub enum Event {
     PyroscopeProfileTypeNext,
     PyroscopeProfileTypePrev,
 
+    PyroscopeServiceFilterFocus,
+    PyroscopeServiceFilterBlur,
     PyroscopeServiceFilterInput(char),
     PyroscopeServiceFilterBackspace,
     PyroscopeServiceFilterClear,
@@ -204,6 +206,7 @@ pub struct Model {
     pub pyroscope_profile_types: Vec<String>,
     pub pyroscope_profile_type_index: usize,
     pub pyroscope_service_filter: String,
+    pub pyroscope_service_filter_focused: bool,
     pub pyroscope_series_index: usize,
     pub pyroscope_selected_service: String,
     pub pyroscope_selected_profile_type: String,
@@ -279,6 +282,7 @@ pub struct ViewModel {
     pub pyroscope_profile_types: Vec<String>,
     pub pyroscope_profile_type_index: usize,
     pub pyroscope_service_filter: String,
+    pub pyroscope_service_filter_focused: bool,
     pub pyroscope_series_index: usize,
     pub pyroscope_selected_service: String,
     pub pyroscope_selected_profile_type: String,
@@ -467,6 +471,14 @@ impl App for ExploreTui {
             Event::PyroscopeProfileTypePrev => {
                 crate::pyroscope::app::handle_pyroscope_profile_type_prev(model)
             }
+            Event::PyroscopeServiceFilterFocus => {
+                model.pyroscope_service_filter_focused = true;
+                render()
+            }
+            Event::PyroscopeServiceFilterBlur => {
+                model.pyroscope_service_filter_focused = false;
+                render()
+            }
             Event::PyroscopeServiceFilterInput(c) => {
                 crate::pyroscope::app::handle_pyroscope_service_filter_input(model, c)
             }
@@ -474,6 +486,7 @@ impl App for ExploreTui {
                 crate::pyroscope::app::handle_pyroscope_service_filter_backspace(model)
             }
             Event::PyroscopeServiceFilterClear => {
+                model.pyroscope_service_filter_focused = false;
                 crate::pyroscope::app::handle_pyroscope_service_filter_clear(model)
             }
             Event::PyroscopeSelectSeries { .. } => {
@@ -604,6 +617,7 @@ impl App for ExploreTui {
             pyroscope_profile_types: model.pyroscope_profile_types.clone(),
             pyroscope_profile_type_index: model.pyroscope_profile_type_index,
             pyroscope_service_filter: model.pyroscope_service_filter.clone(),
+            pyroscope_service_filter_focused: model.pyroscope_service_filter_focused,
             pyroscope_series_index,
             pyroscope_selected_service: model.pyroscope_selected_service.clone(),
             pyroscope_selected_profile_type: model.pyroscope_selected_profile_type.clone(),
