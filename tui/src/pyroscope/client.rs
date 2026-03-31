@@ -13,7 +13,8 @@ use gen::querier::v1::{
     SelectMergeStacktracesRequest, SelectMergeStacktracesResponse, SelectSeriesRequest,
     SelectSeriesResponse, SeriesRequest, SeriesResponse,
 };
-use shared::pyroscope::{HeatmapSlot, TimelinePoint};
+use gen::types::v1::ExemplarType;
+use shared::pyroscope::{HeatmapSlot, TimelineSeries};
 
 pub struct PyroscopeClient {
     http: Client,
@@ -113,25 +114,38 @@ impl PyroscopeClient {
         start: i64,
         end: i64,
         step_s: f64,
-    ) -> Result<Vec<TimelinePoint>> {
+    ) -> Result<Vec<TimelineSeries>> {
         let req = SelectSeriesRequest {
             profile_typeID: profile_type_id.into(),
             label_selector: format!("{{service_name=\"{service}\"}}"),
             start,
             end,
             step: step_s,
+            exemplar_type: ExemplarType::EXEMPLAR_TYPE_INDIVIDUAL.into(),
             ..SelectSeriesRequest::default()
         };
         let resp: SelectSeriesResponse = self.post("SelectSeries", &req).await?;
 
-        // Aggregate all series (sum) into a single timeline.
-        let mut map: std::collections::BTreeMap<i64, f64> = std::collections::BTreeMap::new();
-        for series in &resp.series {
-            for pt in &series.points {
-                *map.entry(pt.timestamp).or_default() += pt.value;
-            }
-        }
-        Ok(map.into_iter().map(|(ts, v)| TimelinePoint { timestamp_ms: ts, value: v }).collect())
+        Ok(resp
+            .series
+            .into_iter()
+            .map(|s| TimelineSeries {
+                labels: s.labels.into_iter().map(|l| (l.name, l.value)).collect(),
+                exemplars: s
+                    .points
+                    .iter()
+                    .flat_map(|p| p.exemplars.iter())
+                    .map(|e| shared::pyroscope::TimelineExemplar {
+                        labels: e.labels.iter().map(|l| (l.name.clone(), l.value.clone())).collect(),
+                        profile_id: e.profile_id.clone(),
+                        span_id: e.span_id.clone(),
+                        value: e.value,
+                        timestamp_ms: e.timestamp,
+                    })
+                    .collect(),
+                points: s.points.into_iter().map(|p| (p.timestamp as f64, p.value)).collect(),
+            })
+            .collect())
     }
 
     pub async fn select_heatmap(

@@ -6,7 +6,7 @@ use crate::app::{
     filtered_pyroscope_series_indices, sorted_datasource_indices, Effect, Event, Model,
     PyroscopeSeriesItem, PyroscopeSubScreen, Screen,
 };
-use crate::pyroscope::{HeatmapSlot, TimelinePoint};
+use crate::pyroscope::{HeatmapSlot, TimelineSeries};
 use crate::pyroscope::FlamegraphNav;
 
 pub fn handle_enter_pyroscope(model: &mut Model) -> Command<Effect, Event> {
@@ -220,7 +220,7 @@ pub fn handle_pyroscope_cycle_view(model: &mut Model) -> Command<Effect, Event> 
 
 pub fn handle_pyroscope_timeline_loaded(
     model: &mut Model,
-    result: Result<Vec<TimelinePoint>, String>,
+    result: Result<Vec<TimelineSeries>, String>,
 ) -> Command<Effect, Event> {
     match result {
         Ok(points) => {

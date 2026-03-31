@@ -318,11 +318,29 @@ pub fn build_flamegraph_view(fg: &FlameGraph, nav: &FlamegraphNav) -> Flamegraph
 
 // ── Timeline ──────────────────────────────────────────────────────────────────
 
-/// One data point in a timeline series (raw API data).
+/// One individual exemplar delivered alongside a series.
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TimelinePoint {
+pub struct TimelineExemplar {
+    /// Exemplar-specific labels (pod, node, …).
+    pub labels: Vec<(String, String)>,
+    /// Unique profile identifier (UUID).
+    pub profile_id: String,
+    /// Span ID (non-empty when the exemplar was captured during a trace span).
+    pub span_id: String,
+    /// Total sample value (e.g. CPU nanoseconds).
+    pub value: i64,
     pub timestamp_ms: i64,
-    pub value: f64,
+}
+
+/// One individual time-series returned by the SelectSeries API, with its full label set.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TimelineSeries {
+    /// All label key-value pairs for this series (e.g. `[("pod", "pod-1"), ...]`).
+    pub labels: Vec<(String, String)>,
+    /// Aggregated data points for the chart.
+    pub points: Vec<(f64, f64)>,
+    /// Individual exemplars delivered alongside the series (populated in INDIVIDUAL mode).
+    pub exemplars: Vec<TimelineExemplar>,
 }
 
 /// One time slot in a heatmap (raw API data).
@@ -338,12 +356,18 @@ pub struct HeatmapSlot {
 /// View model for the timeline chart.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineView {
-    /// Data points as (timestamp_ms as f64, value) — ready for the Chart widget.
+    /// Aggregated data points (sum across all series) for the chart widget.
     pub data: Vec<(f64, f64)>,
     pub value_min: f64,
     pub value_max: f64,
     pub start_ms: i64,
     pub end_ms: i64,
+    /// Per-series data (used to aggregate the chart).
+    pub series: Vec<TimelineSeries>,
+    /// Flattened exemplars from all series, sorted by value descending.
+    pub exemplars: Vec<TimelineExemplar>,
+    /// Label keys that vary across exemplars (non-common labels).
+    pub varying_label_keys: Vec<String>,
 }
 
 /// View model for the heatmap.
@@ -359,20 +383,86 @@ pub struct HeatmapView {
     pub end_ms: i64,
 }
 
-pub fn build_timeline_view(points: &[TimelinePoint]) -> Option<TimelineView> {
-    if points.is_empty() {
+pub fn build_timeline_view(series_list: &[TimelineSeries]) -> Option<TimelineView> {
+    if series_list.is_empty() {
         return None;
     }
-    let value_min = points.iter().map(|p| p.value).fold(f64::INFINITY, f64::min);
-    let value_max = points.iter().map(|p| p.value).fold(f64::NEG_INFINITY, f64::max);
-    let data = points.iter().map(|p| (p.timestamp_ms as f64, p.value)).collect();
+    // Aggregate all series for the chart (sorted by timestamp).
+    let mut map: std::collections::BTreeMap<i64, f64> = std::collections::BTreeMap::new();
+    for s in series_list {
+        for &(ts, v) in &s.points {
+            *map.entry(ts as i64).or_default() += v;
+        }
+    }
+    if map.is_empty() {
+        return None;
+    }
+    let data: Vec<(f64, f64)> = map.iter().map(|(&ts, &v)| (ts as f64, v)).collect();
+    let value_min = data.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
+    let value_max = data.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max);
+    let start_ms = *map.keys().next().unwrap();
+    let end_ms = *map.keys().next_back().unwrap();
+    // Collect and sort all exemplars by value descending.
+    let mut exemplars: Vec<TimelineExemplar> = series_list
+        .iter()
+        .flat_map(|s| s.exemplars.iter().cloned())
+        .collect();
+    exemplars.sort_by(|a, b| b.value.cmp(&a.value));
+
+    let varying_label_keys = if exemplars.is_empty() {
+        compute_varying_label_keys(series_list)
+    } else {
+        compute_varying_label_keys_exemplars(&exemplars)
+    };
     Some(TimelineView {
         data,
         value_min,
         value_max,
-        start_ms: points.first().map(|p| p.timestamp_ms).unwrap_or(0),
-        end_ms: points.last().map(|p| p.timestamp_ms).unwrap_or(0),
+        start_ms,
+        end_ms,
+        series: series_list.to_vec(),
+        exemplars,
+        varying_label_keys,
     })
+}
+
+fn compute_varying_label_keys_exemplars(exemplars: &[TimelineExemplar]) -> Vec<String> {
+    if exemplars.len() <= 1 {
+        return exemplars
+            .first()
+            .map(|e| e.labels.iter().map(|(k, _)| k.clone()).collect())
+            .unwrap_or_default();
+    }
+    let mut key_values: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for e in exemplars {
+        for (k, v) in &e.labels {
+            key_values.entry(k.clone()).or_default().insert(v.clone());
+        }
+    }
+    key_values
+        .into_iter()
+        .filter(|(_, vals)| vals.len() > 1)
+        .map(|(k, _)| k)
+        .collect()
+}
+
+fn compute_varying_label_keys(series_list: &[TimelineSeries]) -> Vec<String> {
+    if series_list.len() <= 1 {
+        return vec![];
+    }
+    let mut key_values: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for s in series_list {
+        for (k, v) in &s.labels {
+            key_values.entry(k.clone()).or_default().insert(v.clone());
+        }
+    }
+    key_values
+        .into_iter()
+        .filter(|(_, vals)| vals.len() > 1)
+        .map(|(k, _)| k)
+        .collect()
 }
 
 pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {

@@ -128,7 +128,7 @@ pub enum Event {
     /// After series are loaded, select the service+profile_type that matches a history entry.
     PyroscopeSelectByName { service_name: String, profile_type: String },
     PyroscopeFlamegraphLoaded(Result<Option<FlameGraph>, String>),
-    PyroscopeTimelineLoaded(Result<Vec<crate::pyroscope::TimelinePoint>, String>),
+    PyroscopeTimelineLoaded(Result<Vec<crate::pyroscope::TimelineSeries>, String>),
     PyroscopeHeatmapLoaded(Result<Vec<crate::pyroscope::HeatmapSlot>, String>),
     PyroscopeCycleView,
 
@@ -245,7 +245,7 @@ pub struct Model {
 
     pub pyroscope_timeline_loading: bool,
     pub pyroscope_timeline_error: Option<String>,
-    pub pyroscope_timeline: Vec<crate::pyroscope::TimelinePoint>,
+    pub pyroscope_timeline: Vec<crate::pyroscope::TimelineSeries>,
 
     pub pyroscope_heatmap_loading: bool,
     pub pyroscope_heatmap_error: Option<String>,

@@ -207,7 +207,7 @@ async fn main() -> Result<()> {
 enum PyroscopeMsg {
     Series(Result<Vec<(String, String)>, String>),
     Flamegraph(Result<Option<shared::pyroscope::FlameGraph>, String>),
-    Timeline(Result<Vec<shared::pyroscope::TimelinePoint>, String>),
+    Timeline(Result<Vec<shared::pyroscope::TimelineSeries>, String>),
     Heatmap(Result<Vec<shared::pyroscope::HeatmapSlot>, String>),
 }
 
