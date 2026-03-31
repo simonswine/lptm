@@ -596,23 +596,136 @@ fn heatmap_color(v: f64) -> Color {
     COLORS[idx.min(COLORS.len() - 1)]
 }
 
-fn frame_color(name: &str) -> Color {
-    const WARM: [Color; 8] = [
-        Color::Red,
-        Color::LightRed,
-        Color::Rgb(255, 95, 0),
-        Color::Rgb(215, 95, 0),
-        Color::Rgb(215, 135, 0),
-        Color::Rgb(175, 0, 0),
-        Color::Yellow,
-        Color::LightYellow,
-    ];
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in name.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+/// Port of murmurhash3_32_gc from @grafana/flamegraph/murmur3.ts (seed=0).
+fn murmurhash3_32(key: &str, seed: u32) -> u32 {
+    let bytes = key.as_bytes();
+    let len = bytes.len();
+    let n_blocks = len / 4;
+
+    let mut h1: u32 = seed;
+    const C1: u32 = 0xcc9e2d51;
+    const C2: u32 = 0x1b873593;
+
+    let mut i = 0;
+    for _ in 0..n_blocks {
+        let k1 = (bytes[i] as u32)
+            | ((bytes[i + 1] as u32) << 8)
+            | ((bytes[i + 2] as u32) << 16)
+            | ((bytes[i + 3] as u32) << 24);
+        i += 4;
+        let k1 = k1.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+        h1 ^= k1;
+        h1 = h1.rotate_left(13);
+        h1 = h1.wrapping_mul(5).wrapping_add(0xe6546b64);
     }
-    WARM[(hash % WARM.len() as u64) as usize]
+
+    let mut k1: u32 = 0;
+    let remainder = len & 3;
+    if remainder >= 3 {
+        k1 ^= (bytes[i + 2] as u32) << 16;
+    }
+    if remainder >= 2 {
+        k1 ^= (bytes[i + 1] as u32) << 8;
+    }
+    if remainder >= 1 {
+        k1 ^= bytes[i] as u32;
+    }
+    let k1 = k1.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+    h1 ^= k1;
+
+    h1 ^= len as u32;
+    h1 ^= h1 >> 16;
+    h1 = h1.wrapping_mul(0x85ebca6b);
+    h1 ^= h1 >> 13;
+    h1 = h1.wrapping_mul(0xc2b2ae35);
+    h1 ^= h1 >> 16;
+    h1
+}
+
+/// Extract the package name from a profiling symbol label, mirroring the
+/// logic in @grafana/flamegraph/FlameGraph/colors.ts → getPackageName().
+fn get_package_name(label: &str) -> &str {
+    // PHP / Python / Ruby: directory portion before the source file
+    for ext in &[".php", ".py", ".rb"] {
+        if let Some(pos) = label.find(ext) {
+            if let Some(slash) = label[..pos].rfind('/') {
+                return &label[..slash + 1];
+            }
+        }
+    }
+
+    // Rust / C++: "crate::module::func" → "crate"
+    if let Some(pos) = label.find("::") {
+        return &label[..pos];
+    }
+
+    // Node.js: "(./node_modules/)pkg/file.js:func:line"
+    if label.contains(':') {
+        if let Some(colon) = label.find(':') {
+            let path = &label[..colon];
+            let path = path.strip_prefix("./node_modules/").unwrap_or(path);
+            if let Some(slash) = path.find('/') {
+                return &path[..slash];
+            }
+            return path;
+        }
+    }
+
+    // Go / Java: "github.com/pkg/foo.Func" → "github.com/pkg/foo."
+    if label.contains('/') {
+        if let Some(last_slash) = label.rfind('/') {
+            let after = &label[last_slash + 1..];
+            if let Some(dot) = after.find('.') {
+                return &label[..last_slash + 1 + dot + 1];
+            }
+            return &label[..last_slash + 1];
+        }
+    }
+
+    // dotnet / simple Go: "runtime.goroutine" → "runtime."
+    let without_args = if let Some(p) = label.find('(') { &label[..p] } else { label };
+    if let Some(dot) = without_args.find('.') {
+        return &label[..dot + 1];
+    }
+
+    label
+}
+
+/// Color a flamegraph frame using the same palette as @grafana/flamegraph.
+/// Colors are keyed by package name (murmurhash3 % 24).
+fn frame_color(name: &str) -> Color {
+    // Palette from @grafana/flamegraph/FlameGraph/colors.ts → packageColors
+    // HSL entries converted to RGB; RGB entries taken directly.
+    const PALETTE: [(u8, u8, u8); 24] = [
+        (223, 139,  83), // h:24  s:69%  l:60%
+        (224, 173, 108), // h:34  s:65%  l:65%
+        (104, 183, 207), // h:194 s:52%  l:61%
+        ( 89, 192, 163), // h:163 s:45%  l:55%
+        (104, 151, 202), // h:211 s:48%  l:60%
+        (137, 130, 201), // h:246 s:40%  l:65%
+        (235, 168, 230), // h:305 s:63%  l:79%
+        (255, 225, 117), // h:47  s:100% l:73%
+        (183, 219, 171),
+        (244, 213, 152),
+        ( 78, 146, 249),
+        (249, 186, 143),
+        (242, 145, 145),
+        (130, 181, 216),
+        (229, 168, 226),
+        (174, 162, 224),
+        (154, 196, 138),
+        (242, 201, 109),
+        (101, 197, 219),
+        (249, 147,  78),
+        (234, 100,  96),
+        ( 81, 149, 206),
+        (214, 131, 206),
+        (128, 110, 183),
+    ];
+    let pkg = get_package_name(name);
+    let hash = murmurhash3_32(pkg, 0);
+    let (r, g, b) = PALETTE[hash as usize % PALETTE.len()];
+    Color::Rgb(r, g, b)
 }
 
 fn center_truncate(s: &str, width: usize) -> String {
