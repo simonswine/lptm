@@ -1,4 +1,5 @@
 syntax = "proto3";
+
 package types.v1;
 
 message LabelPair {
@@ -6,13 +7,45 @@ message LabelPair {
   string value = 2;
 }
 
+message ProfileType {
+  string ID = 1;
+  string name = 2;
+  string sample_type = 4;
+  string sample_unit = 5;
+  string period_type = 6;
+  string period_unit = 7;
+}
+
 message Labels {
   repeated LabelPair labels = 1;
 }
 
+message ProfileAnnotation {
+  string key = 1;
+  string value = 2;
+}
+
+// Exemplar represents metadata for an individual profile sample.
+message Exemplar {
+  // Milliseconds since epoch when the profile was captured.
+  int64 timestamp = 1;
+  // Unique identifier for the profile (UUID).
+  string profile_id = 2;
+  // Span ID if this profile was split by span during ingestion.
+  string span_id = 3;
+  // Total sample value for this profile (e.g., CPU nanoseconds, bytes allocated).
+  int64 value = 4;
+  // Labels specific to this exemplar.
+  repeated LabelPair labels = 5;
+}
+
 message Point {
   double value = 1;
+  // Milliseconds unix timestamp
   int64 timestamp = 2;
+  repeated ProfileAnnotation annotations = 3;
+  // Exemplars are samples of individual profiles that contributed to this aggregated point.
+  repeated Exemplar exemplars = 4;
 }
 
 message Series {
@@ -21,9 +54,14 @@ message Series {
 }
 
 message HeatmapSlot {
+  // Milliseconds unix timestamp
   int64 timestamp = 1;
+  // Minimum y value
   repeated double y_min = 2;
+  // How many matches
   repeated int32 counts = 3;
+  // Exemplars
+  repeated Exemplar exemplars = 4;
 }
 
 message HeatmapSeries {
@@ -34,4 +72,68 @@ message HeatmapSeries {
 enum TimeSeriesAggregationType {
   TIME_SERIES_AGGREGATION_TYPE_SUM = 0;
   TIME_SERIES_AGGREGATION_TYPE_AVERAGE = 1;
+}
+
+enum ExemplarType {
+  EXEMPLAR_TYPE_UNSPECIFIED = 0;
+  EXEMPLAR_TYPE_NONE = 1;
+  EXEMPLAR_TYPE_INDIVIDUAL = 2;
+  EXEMPLAR_TYPE_SPAN = 3;
+}
+
+message LabelValuesRequest {
+  string name = 1;
+  repeated string matchers = 2;
+  int64 start = 3;
+  int64 end = 4;
+}
+
+message LabelValuesResponse {
+  repeated string names = 1;
+}
+
+message LabelNamesRequest {
+  repeated string matchers = 1;
+  int64 start = 2;
+  int64 end = 3;
+}
+
+message LabelNamesResponse {
+  repeated string names = 1;
+}
+
+message StackTraceSelector {
+  repeated Location call_site = 1;
+  GoPGO go_pgo = 2;
+}
+
+message Location {
+  string name = 1;
+}
+
+message GoPGO {
+  uint32 keep_locations = 1;
+  bool aggregate_callees = 2;
+}
+
+message GetProfileStatsRequest {}
+
+message GetProfileStatsResponse {
+  bool data_ingested = 1;
+  int64 oldest_profile_time = 2;
+  int64 newest_profile_time = 3;
+}
+
+message BlockInfo {
+  string ulid = 1;
+  int64 min_time = 2;
+  int64 max_time = 3;
+  BlockCompaction compaction = 4;
+  repeated LabelPair labels = 5;
+}
+
+message BlockCompaction {
+  int32 level = 1;
+  repeated string sources = 2;
+  repeated string parents = 3;
 }
