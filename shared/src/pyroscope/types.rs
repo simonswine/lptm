@@ -252,6 +252,104 @@ pub struct SandwichView {
     pub units: String,
 }
 
+// ── Callee tree helpers (private) ─────────────────────────────────────────────
+
+struct CalleeNode {
+    name: String,
+    total: u64,
+    self_s: u64,
+    children: Vec<CalleeNode>,
+}
+
+/// Collect frames at `level` that intersect any of `ranges`, recursing into children.
+fn build_callee_subtree(fg: &FlameGraph, level: usize, ranges: &[(u64, u64)]) -> Vec<CalleeNode> {
+    if level >= fg.levels.len() || ranges.is_empty() {
+        return Vec::new();
+    }
+    let raw = &fg.levels[level].values;
+    let mut nodes: Vec<CalleeNode> = Vec::new();
+    for i in 0..(raw.len() / 4) {
+        let fx = raw[i * 4] as u64;
+        let fw = raw[i * 4 + 1] as u64;
+        if fw == 0 {
+            continue;
+        }
+        let fx_end = fx + fw;
+        let fs = raw[i * 4 + 2] as u64;
+        let mut clipped_total = 0u64;
+        let mut child_ranges: Vec<(u64, u64)> = Vec::new();
+        for &(rs, re) in ranges {
+            if fx < re && fx_end > rs {
+                let start = fx.max(rs);
+                let end = fx_end.min(re);
+                clipped_total += end - start;
+                child_ranges.push((start, end));
+            }
+        }
+        if clipped_total == 0 {
+            continue;
+        }
+        let self_s = (fs as u128 * clipped_total as u128 / fw as u128) as u64;
+        let name = fg.names.get(raw[i * 4 + 3] as usize).cloned().unwrap_or_default();
+        let children = build_callee_subtree(fg, level + 1, &child_ranges);
+        nodes.push(CalleeNode { name, total: clipped_total, self_s, children });
+    }
+    nodes
+}
+
+/// Merge nodes with the same name, summing samples and recursively merging children.
+fn merge_callee_nodes(nodes: Vec<CalleeNode>) -> Vec<CalleeNode> {
+    use std::collections::BTreeMap;
+    let mut by_name: BTreeMap<String, (u64, u64, Vec<CalleeNode>)> = BTreeMap::new();
+    for node in nodes {
+        let entry = by_name.entry(node.name).or_insert((0, 0, Vec::new()));
+        entry.0 += node.total;
+        entry.1 += node.self_s;
+        entry.2.extend(node.children);
+    }
+    by_name
+        .into_iter()
+        .map(|(name, (total, self_s, children))| CalleeNode {
+            name,
+            total,
+            self_s,
+            children: merge_callee_nodes(children),
+        })
+        .collect()
+}
+
+/// Recursively lay out nodes into `levels`, positioning children within the
+/// parent's x-range so deeper frames appear directly below their parent.
+fn flatten_callee_tree(
+    nodes: &mut Vec<CalleeNode>,
+    x_start: u64,
+    target_samples: u64,
+    depth: usize,
+    levels: &mut Vec<FlamegraphLevelView>,
+) {
+    if nodes.is_empty() {
+        return;
+    }
+    nodes.sort_by(|a, b| b.total.cmp(&a.total));
+    while levels.len() <= depth {
+        levels.push(FlamegraphLevelView { frames: Vec::new() });
+    }
+    let mut x = x_start;
+    for node in nodes.iter_mut() {
+        levels[depth].frames.push(FlamegraphFrameView {
+            name: node.name.clone(),
+            x_start: x,
+            width: node.total,
+            self_samples: node.self_s,
+            total_pct: node.total as f64 / target_samples as f64 * 100.0,
+            self_pct: node.self_s as f64 / target_samples as f64 * 100.0,
+            is_selected: false,
+        });
+        flatten_callee_tree(&mut node.children, x, target_samples, depth + 1, levels);
+        x += node.total;
+    }
+}
+
 /// Build a sandwich view for `target_name` from the flamegraph.
 ///
 /// Finds all occurrences of `target_name`, then:
@@ -295,54 +393,16 @@ pub fn build_sandwich_view(fg: &FlameGraph, target_name: &str, units: String) ->
     let n_occs = occ_level.len();
     let target_samples: u64 = occ_width.iter().sum();
 
-    // ── Build callees (what the target calls) ────────────────────────────────
-    // depth_callees[d] = BTreeMap<name, (total_samples, self_samples)>
-    let mut depth_callees: Vec<BTreeMap<String, (u64, u64)>> = Vec::new();
-
+    // ── Build callees (tree-based, preserving parent-child x-positioning) ────
+    let mut all_roots: Vec<CalleeNode> = Vec::new();
     for idx in 0..n_occs {
-        let mut ranges: Vec<(u64, u64)> = vec![(occ_x_off[idx], occ_x_end[idx])];
-        let mut d = 0usize;
-        loop {
-            if ranges.is_empty() {
-                break;
-            }
-            let li = occ_level[idx] + 1 + d;
-            if li >= fg.levels.len() {
-                break;
-            }
-            if d == depth_callees.len() {
-                depth_callees.push(BTreeMap::new());
-            }
-            let raw = &fg.levels[li].values;
-            let mut next_ranges: Vec<(u64, u64)> = Vec::new();
-            for i in 0..(raw.len() / 4) {
-                let fx = raw[i * 4] as u64;
-                let fw = raw[i * 4 + 1] as u64;
-                if fw == 0 {
-                    continue;
-                }
-                let fx_end = fx + fw;
-                let fs = raw[i * 4 + 2] as u64;
-                let mut clipped = 0u64;
-                for &(rs, re) in &ranges {
-                    if fx < re && fx_end > rs {
-                        clipped += fx_end.min(re) - fx.max(rs);
-                        next_ranges.push((fx.max(rs), fx_end.min(re)));
-                    }
-                }
-                if clipped == 0 {
-                    continue;
-                }
-                let name = fg.names.get(raw[i * 4 + 3] as usize).cloned().unwrap_or_default();
-                let self_s = (fs as u128 * clipped as u128 / fw as u128) as u64;
-                let e = depth_callees[d].entry(name).or_insert((0, 0));
-                e.0 += clipped;
-                e.1 += self_s;
-            }
-            ranges = next_ranges;
-            d += 1;
-        }
+        let subtree =
+            build_callee_subtree(fg, occ_level[idx] + 1, &[(occ_x_off[idx], occ_x_end[idx])]);
+        all_roots.extend(subtree);
     }
+    let mut callee_roots = merge_callee_nodes(all_roots);
+    let mut callees: Vec<FlamegraphLevelView> = Vec::new();
+    flatten_callee_tree(&mut callee_roots, 0, target_samples, 0, &mut callees);
 
     // ── Build callers (what calls the target) ────────────────────────────────
     // Each ancestor is credited with occ.width (Grafana's "trim to child" approach).
@@ -371,32 +431,8 @@ pub fn build_sandwich_view(fg: &FlameGraph, target_name: &str, units: String) ->
         }
     }
 
-    // ── Convert to FlamegraphLevelView ────────────────────────────────────────
+    // ── Convert callers to FlamegraphLevelView ────────────────────────────────
     // Frames sorted by total samples descending, laid out consecutively from x=0.
-    let make_callee_level = |map: &BTreeMap<String, (u64, u64)>| -> FlamegraphLevelView {
-        let mut v: Vec<_> = map.iter().map(|(n, &(t, s))| (n.as_str(), t, s)).collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
-        let mut x = 0u64;
-        FlamegraphLevelView {
-            frames: v
-                .into_iter()
-                .map(|(n, t, s)| {
-                    let f = FlamegraphFrameView {
-                        name: n.to_string(),
-                        x_start: x,
-                        width: t,
-                        self_samples: s,
-                        total_pct: t as f64 / target_samples as f64 * 100.0,
-                        self_pct: s as f64 / target_samples as f64 * 100.0,
-                        is_selected: false,
-                    };
-                    x += t;
-                    f
-                })
-                .collect(),
-        }
-    };
-
     let make_caller_level = |map: &BTreeMap<String, u64>| -> FlamegraphLevelView {
         let mut v: Vec<_> = map.iter().map(|(n, &t)| (n.as_str(), t)).collect();
         v.sort_by(|a, b| b.1.cmp(&a.1));
@@ -421,7 +457,6 @@ pub fn build_sandwich_view(fg: &FlameGraph, target_name: &str, units: String) ->
         }
     };
 
-    let callees: Vec<_> = depth_callees.iter().map(|m| make_callee_level(m)).collect();
     let mut callers: Vec<_> = depth_callers.iter().map(|m| make_caller_level(m)).collect();
     callers.reverse(); // outermost (root-side) first for top-to-bottom rendering
 
