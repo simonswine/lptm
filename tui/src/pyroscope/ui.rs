@@ -1,11 +1,12 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    widgets::{Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame,
 };
-use shared::{pyroscope::{HeatmapView, TimelineView}, FlamegraphView, PyroscopeSubScreenView, ViewModel};
+use shared::{pyroscope::{HeatmapView, ProfileUnit, TimelineView}, FlamegraphView, PyroscopeSubScreenView, ViewModel};
 
 pub fn render_pyroscope_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     match vm.pyroscope_sub_screen {
@@ -309,7 +310,11 @@ fn render_pyroscope_timeline_screen(frame: &mut Frame, vm: &ViewModel, area: Rec
         return;
     }
     if let Some(ref tl) = vm.timeline {
-        render_timeline(frame, tl, block, chart_area);
+        let unit = ProfileUnit::from_profile_type_id(&vm.pyroscope_selected_profile_type);
+        let [vis_area, table_area] =
+            Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(chart_area);
+        render_timeline(frame, tl, block, vis_area, unit);
+        render_timeline_exemplars(frame, tl, table_area, unit);
     } else {
         frame.render_widget(
             Paragraph::new("No timeline data.")
@@ -320,90 +325,41 @@ fn render_pyroscope_timeline_screen(frame: &mut Frame, vm: &ViewModel, area: Rec
     }
 }
 
-fn render_timeline(frame: &mut Frame, tl: &TimelineView, block: Block, area: Rect) {
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if tl.data.is_empty() || inner.height < 3 || inner.width == 0 {
-        return;
-    }
-
-    // Reserve bottom row for x-axis labels, second-to-last for status.
-    let bar_rows = inner.height.saturating_sub(2) as usize;
-    let w = inner.width as usize;
-    let n = tl.data.len();
-
+fn render_timeline(frame: &mut Frame, tl: &TimelineView, block: Block, area: Rect, unit: ProfileUnit) {
     let v_max = tl.value_max.max(1.0);
     let v_min = 0.0_f64.min(tl.value_min);
-    let v_range = (v_max - v_min).max(1.0);
 
-    // Resample: one bar per terminal column, take the max value in each bucket.
-    let bars: Vec<f64> = (0..w)
-        .map(|col| {
-            let start = col * n / w;
-            let end = ((col + 1) * n / w).max(start + 1).min(n);
-            let max_v = tl.data[start..end]
-                .iter()
-                .map(|(_, v)| *v)
-                .fold(f64::NEG_INFINITY, f64::max);
-            ((max_v - v_min) / v_range).clamp(0.0, 1.0)
-        })
-        .collect();
+    let dataset = Dataset::default()
+        .marker(symbols::Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(Color::Green))
+        .data(&tl.data);
 
-    // ▁▂▃▄▅▆▇  (index 0 = empty, 1..7 = partial heights, full = █)
-    const PARTIAL: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'];
+    let mid_ms = (tl.start_ms + tl.end_ms) / 2;
+    let x_axis = Axis::default()
+        .style(Style::default().fg(Color::DarkGray))
+        .bounds([tl.start_ms as f64, tl.end_ms as f64])
+        .labels([
+            Span::styled(format_time_label(tl.start_ms), Style::default().fg(Color::DarkGray)),
+            Span::styled(format_time_label(mid_ms), Style::default().fg(Color::DarkGray)),
+            Span::styled(format_time_label(tl.end_ms), Style::default().fg(Color::DarkGray)),
+        ]);
 
-    for row in 0..bar_rows {
-        let row_from_bottom = bar_rows - 1 - row;
-        let spans: Vec<Span> = bars
-            .iter()
-            .map(|&v| {
-                let bar_h = v * bar_rows as f64;
-                let full = bar_h.floor() as usize;
-                let frac = bar_h - full as f64;
-                let (ch, fg) = if row_from_bottom < full {
-                    ('█', Color::Green)
-                } else if row_from_bottom == full && frac > 0.0 {
-                    let idx = ((frac * PARTIAL.len() as f64) as usize).min(PARTIAL.len() - 1);
-                    (PARTIAL[idx], Color::Green)
-                } else {
-                    (' ', Color::Reset)
-                };
-                Span::styled(ch.to_string(), Style::default().fg(fg))
-            })
-            .collect();
-        let row_area = Rect::new(inner.x, inner.y + row as u16, inner.width, 1);
-        frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
-    }
+    let y_axis = Axis::default()
+        .style(Style::default().fg(Color::DarkGray))
+        .bounds([v_min, v_max])
+        .labels([
+            Span::styled(unit.format(v_min), Style::default().fg(Color::DarkGray)),
+            Span::styled(unit.format(v_max / 2.0), Style::default().fg(Color::DarkGray)),
+            Span::styled(unit.format(v_max), Style::default().fg(Color::DarkGray)),
+        ]);
 
-    // X-axis labels row.
-    let start_lbl = format_time_label(tl.start_ms);
-    let end_lbl = format_time_label(tl.end_ms);
-    let mid_lbl = format_time_label((tl.start_ms + tl.end_ms) / 2);
-    let x_row = Rect::new(inner.x, inner.y + bar_rows as u16, inner.width, 1);
-    let pad_right = inner.width.saturating_sub(
-        (start_lbl.len() + mid_lbl.len() + end_lbl.len()) as u16,
-    ) / 2;
-    let x_line = Line::from(vec![
-        Span::styled(start_lbl, Style::default().fg(Color::DarkGray)),
-        Span::raw(" ".repeat(pad_right as usize)),
-        Span::styled(mid_lbl, Style::default().fg(Color::DarkGray)),
-        Span::raw(" ".repeat(pad_right as usize)),
-        Span::styled(end_lbl, Style::default().fg(Color::DarkGray)),
-    ]);
-    frame.render_widget(Paragraph::new(x_line), x_row);
+    let chart = Chart::new(vec![dataset])
+        .block(block)
+        .x_axis(x_axis)
+        .y_axis(y_axis);
 
-    // Status / y-range row.
-    let status = format!(
-        " 0 – {}  ({} points)",
-        format_value_label(v_max),
-        n,
-    );
-    let status_row = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-    frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(Color::Cyan)),
-        status_row,
-    );
+    frame.render_widget(chart, area);
 }
 
 fn format_time_label(ms: i64) -> String {
@@ -412,19 +368,6 @@ fn format_time_label(ms: i64) -> String {
     let m = (secs / 60) % 60;
     let s = secs % 60;
     format!("{h:02}:{m:02}:{s:02}")
-}
-
-fn format_value_label(v: f64) -> String {
-    let abs = v.abs();
-    if abs >= 1_000_000_000.0 {
-        format!("{:.1}G", v / 1_000_000_000.0)
-    } else if abs >= 1_000_000.0 {
-        format!("{:.1}M", v / 1_000_000.0)
-    } else if abs >= 1_000.0 {
-        format!("{:.1}K", v / 1_000.0)
-    } else {
-        format!("{v:.1}")
-    }
 }
 
 fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect) {
@@ -447,7 +390,11 @@ fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect
         return;
     }
     if let Some(ref hm) = vm.heatmap {
-        render_heatmap(frame, hm, block, chart_area);
+        let unit = ProfileUnit::from_profile_type_id(&vm.pyroscope_selected_profile_type);
+        let [vis_area, table_area] =
+            Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(chart_area);
+        render_heatmap(frame, hm, block, vis_area, unit);
+        render_heatmap_exemplars(frame, hm, table_area, unit);
     } else {
         frame.render_widget(
             Paragraph::new("No heatmap data.")
@@ -458,7 +405,7 @@ fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect
     }
 }
 
-fn render_heatmap(frame: &mut Frame, hm: &HeatmapView, block: Block, area: Rect) {
+fn render_heatmap(frame: &mut Frame, hm: &HeatmapView, block: Block, area: Rect, unit: ProfileUnit) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -489,12 +436,147 @@ fn render_heatmap(frame: &mut Frame, hm: &HeatmapView, block: Block, area: Rect)
         frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
     }
 
-    let status = format!(" y: {:.0} – {:.0}", hm.y_min, hm.y_max);
+    let status = format!(" y: {} – {}", unit.format(hm.y_min), unit.format(hm.y_max));
     let status_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().fg(Color::Cyan)),
         status_area,
     );
+}
+
+fn render_timeline_exemplars(frame: &mut Frame, tl: &TimelineView, area: Rect, unit: ProfileUnit) {
+    let block = Block::default().borders(Borders::ALL).title(" Exemplars ");
+
+    let varying = &tl.varying_label_keys;
+
+    let rows_data: Vec<(i64, i64, Vec<String>)> = tl
+        .exemplars
+        .iter()
+        .map(|e| {
+            let label_vals = varying
+                .iter()
+                .map(|k| {
+                    e.labels
+                        .iter()
+                        .find(|(lk, _)| lk == k)
+                        .map(|(_, lv)| lv.clone())
+                        .unwrap_or_default()
+                })
+                .collect();
+            (e.timestamp_ms, e.value, label_vals)
+        })
+        .collect();
+
+    let has_profile_id = tl.exemplars.iter().any(|e| !e.profile_id.is_empty());
+    let has_span_id = tl.exemplars.iter().any(|e| !e.span_id.is_empty());
+
+    let bold_cyan = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let mut header_cells = vec![
+        Cell::from("Time").style(bold_cyan),
+        Cell::from("Value").style(bold_cyan),
+    ];
+    for k in varying {
+        header_cells.push(Cell::from(k.clone()).style(bold_cyan));
+    }
+    if has_profile_id {
+        header_cells.push(Cell::from("Profile ID").style(bold_cyan));
+    }
+    if has_span_id {
+        header_cells.push(Cell::from("Span ID").style(bold_cyan));
+    }
+
+    let rows: Vec<Row> = rows_data
+        .iter()
+        .zip(tl.exemplars.iter())
+        .map(|((ts, v, labels), e)| {
+            let mut cells = vec![
+                Cell::from(format_time_label(*ts)),
+                Cell::from(unit.format(*v as f64)),
+            ];
+            for lv in labels {
+                cells.push(Cell::from(lv.clone()));
+            }
+            if has_profile_id {
+                cells.push(Cell::from(e.profile_id.clone()).style(Style::default().fg(Color::DarkGray)));
+            }
+            if has_span_id {
+                cells.push(Cell::from(e.span_id.clone()).style(Style::default().fg(Color::DarkGray)));
+            }
+            Row::new(cells)
+        })
+        .collect();
+
+    let mut constraints = vec![Constraint::Fill(1), Constraint::Length(10)];
+    for _ in varying {
+        constraints.push(Constraint::Fill(1));
+    }
+    if has_profile_id {
+        constraints.push(Constraint::Fill(2));
+    }
+    if has_span_id {
+        constraints.push(Constraint::Length(18));
+    }
+
+    let table = Table::new(rows, constraints).header(Row::new(header_cells)).block(block);
+    frame.render_widget(table, area);
+}
+
+fn render_heatmap_exemplars(frame: &mut Frame, hm: &HeatmapView, area: Rect, unit: ProfileUnit) {
+    let block = Block::default().borders(Borders::ALL).title(" Top Values ");
+
+    let n_cols = hm.columns.len();
+    if n_cols == 0 || hm.n_buckets == 0 {
+        frame.render_widget(Paragraph::new("No data.").block(block), area);
+        return;
+    }
+
+    let time_span = hm.end_ms - hm.start_ms;
+    let y_span = hm.y_max - hm.y_min;
+
+    // One entry per column: find the bucket with the highest intensity.
+    let mut entries: Vec<(f64, String, String)> = hm
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(c, col)| {
+            let (b, &intensity) = col
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+            if intensity <= 0.0 {
+                return None;
+            }
+            let ts_ms = hm.start_ms + c as i64 * time_span / n_cols as i64;
+            let y_val = hm.y_min + b as f64 * y_span / hm.n_buckets as f64;
+            Some((intensity, format_time_label(ts_ms), unit.format(y_val)))
+        })
+        .collect();
+
+    entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let header = Row::new([
+        Cell::from("Time").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Cell::from("Value").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Cell::from("Intensity").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    ]);
+    let rows: Vec<Row> = entries
+        .iter()
+        .map(|(intensity, time, y)| {
+            Row::new([
+                Cell::from(time.clone()),
+                Cell::from(y.clone()),
+                Cell::from(format!("{:.2}", intensity)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [Constraint::Fill(1), Constraint::Length(10), Constraint::Length(10)],
+    )
+    .header(header)
+    .block(block);
+    frame.render_widget(table, area);
 }
 
 fn heatmap_color(v: f64) -> Color {

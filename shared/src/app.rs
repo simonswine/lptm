@@ -734,7 +734,15 @@ impl App for ExploreTui {
         let flamegraph = model
             .pyroscope_flamegraph
             .as_ref()
-            .map(|fg| build_flamegraph_view(fg, &model.flamegraph_nav));
+            .map(|fg| {
+                let mut fgv = build_flamegraph_view(fg, &model.flamegraph_nav);
+                fgv.units = crate::pyroscope::ProfileUnit::from_profile_type_id(
+                    &model.pyroscope_selected_profile_type,
+                )
+                .label()
+                .to_string();
+                fgv
+            });
 
         let pyroscope_sub_screen = match model.pyroscope_sub_screen {
             PyroscopeSubScreen::ServiceList => PyroscopeSubScreenView::ServiceList,
