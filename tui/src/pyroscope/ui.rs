@@ -290,10 +290,14 @@ fn render_sandwich_view(frame: &mut Frame, sw: &SandwichView, block: Block, area
     let usable_h = inner.height - 1; // last row = status line
     let w = inner.width as u64;
     let samples = sw.target_samples;
+
+    // Skip outermost callers if they overflow the available height, preserving
+    // the most direct callers (at the bottom of the callers slice).
+    let n_callers = sw.callers.len() as u16;
+    let caller_skip = n_callers.saturating_sub(usable_h.saturating_sub(3)) as usize;
     let mut row = 0u16;
 
-    // Callers (outermost first = top of screen)
-    for level in &sw.callers {
+    for level in sw.callers.iter().skip(caller_skip) {
         if row >= usable_h {
             break;
         }

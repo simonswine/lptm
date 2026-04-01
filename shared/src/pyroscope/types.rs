@@ -346,8 +346,12 @@ fn merge_nodes(nodes: Vec<SandwichNode>) -> Vec<SandwichNode> {
         .collect()
 }
 
-/// Recursively lay out nodes into `levels`, positioning children within the
-/// parent's x-range so deeper frames appear directly below their parent.
+/// Maximum depth of the deepest leaf reachable from `nodes` (leaf = 1, empty = 0).
+fn subtree_height(nodes: &[SandwichNode]) -> usize {
+    nodes.iter().map(|n| 1 + subtree_height(&n.children)).max().unwrap_or(0)
+}
+
+/// Lay out callee nodes top-down: depth 0 = first row, children below their parent.
 fn flatten_tree(
     nodes: &mut Vec<SandwichNode>,
     x_start: u64,
@@ -374,6 +378,41 @@ fn flatten_tree(
             is_selected: false,
         });
         flatten_tree(&mut node.children, x, target_samples, depth + 1, levels);
+        x += node.total;
+    }
+}
+
+/// Lay out caller nodes bottom-aligned: each node's row is determined by its
+/// subtree height so that every direct caller (leaf) lands at `total_depth - 1`
+/// regardless of how deep its path goes. Shorter paths get empty space at the top.
+fn flatten_caller_tree(
+    nodes: &mut Vec<SandwichNode>,
+    x_start: u64,
+    target_samples: u64,
+    total_depth: usize,
+    levels: &mut Vec<FlamegraphLevelView>,
+) {
+    if nodes.is_empty() {
+        return;
+    }
+    nodes.sort_by(|a, b| b.total.cmp(&a.total));
+    let mut x = x_start;
+    for node in nodes.iter_mut() {
+        let h = 1 + subtree_height(&node.children);
+        let row = total_depth - h;
+        while levels.len() <= row {
+            levels.push(FlamegraphLevelView { frames: Vec::new() });
+        }
+        levels[row].frames.push(FlamegraphFrameView {
+            name: node.name.clone(),
+            x_start: x,
+            width: node.total,
+            self_samples: node.self_s,
+            total_pct: node.total as f64 / target_samples as f64 * 100.0,
+            self_pct: node.self_s as f64 / target_samples as f64 * 100.0,
+            is_selected: false,
+        });
+        flatten_caller_tree(&mut node.children, x, target_samples, total_depth, levels);
         x += node.total;
     }
 }
@@ -445,8 +484,13 @@ pub fn build_sandwich_view(fg: &FlameGraph, target_name: &str, units: String) ->
         ));
     }
     let mut caller_roots = merge_nodes(caller_roots);
+    let total_caller_depth = subtree_height(&caller_roots);
     let mut callers: Vec<FlamegraphLevelView> = Vec::new();
-    flatten_tree(&mut caller_roots, 0, target_samples, 0, &mut callers);
+    flatten_caller_tree(&mut caller_roots, 0, target_samples, total_caller_depth, &mut callers);
+    // Ensure all levels up to total_caller_depth exist (intermediate rows may be empty).
+    while callers.len() < total_caller_depth {
+        callers.push(FlamegraphLevelView { frames: Vec::new() });
+    }
 
     Some(SandwichView {
         target_name: target_name.to_string(),
@@ -741,5 +785,252 @@ pub fn parse_time_range(s: &str) -> Option<u64> {
         n.parse::<u64>().ok().map(|d| d * 86400)
     } else {
         None
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a FlameGraph with pre-normalised (absolute) x offsets.
+    fn make_fg(total: i64, names: Vec<&str>, levels: Vec<Vec<i64>>) -> FlameGraph {
+        FlameGraph {
+            names: names.into_iter().map(|s| s.to_string()).collect(),
+            levels: levels.into_iter().map(|v| Level { values: v }).collect(),
+            total,
+            max_self: 0,
+        }
+    }
+
+    // ── Callee positioning ────────────────────────────────────────────────────
+
+    /// Callees at depth >1 must be positioned under their parent frame, not
+    /// all left-aligned from x=0.
+    ///
+    /// Layout:
+    ///   L0: root       (0..100)
+    ///   L1: target     (0..100)
+    ///   L2: funcA      (0..60),  funcB     (60..100)
+    ///   L3: child_of_A (0..40),  child_of_B(60..80)
+    ///
+    /// child_of_B is under funcB and must appear at x=60, not x=40.
+    #[test]
+    fn test_callee_positioning() {
+        let graph = make_fg(
+            100,
+            vec!["root", "target", "funcA", "funcB", "child_of_A", "child_of_B"],
+            vec![
+                vec![0, 100, 0, 0],               // L0
+                vec![0, 100, 0, 1],               // L1: target
+                vec![0, 60, 10, 2, 60, 40, 5, 3], // L2: funcA, funcB
+                vec![0, 40, 40, 4, 60, 20, 20, 5], // L3: child_of_A, child_of_B
+            ],
+        );
+
+        let sw = build_sandwich_view(&graph, "target", "samples".into()).unwrap();
+
+        assert_eq!(sw.target_samples, 100);
+        assert_eq!(sw.callees.len(), 2);
+
+        // Depth 0: funcA(60) then funcB(40), sorted by total desc.
+        let l0 = &sw.callees[0].frames;
+        assert_eq!(l0.len(), 2);
+        assert_eq!(l0[0].name, "funcA");
+        assert_eq!(l0[0].x_start, 0);
+        assert_eq!(l0[0].width, 60);
+        assert_eq!(l0[1].name, "funcB");
+        assert_eq!(l0[1].x_start, 60);
+        assert_eq!(l0[1].width, 40);
+
+        // Depth 1: child_of_A under funcA, child_of_B under funcB.
+        let l1 = &sw.callees[1].frames;
+        assert_eq!(l1.len(), 2);
+        let a = l1.iter().find(|f| f.name == "child_of_A").unwrap();
+        let b = l1.iter().find(|f| f.name == "child_of_B").unwrap();
+        assert_eq!(a.x_start, 0);
+        assert_eq!(a.width, 40);
+        // Key: child_of_B must sit under funcB (x=60), not left-aligned at x=40.
+        assert_eq!(b.x_start, 60, "child_of_B must be positioned under funcB");
+        assert_eq!(b.width, 20);
+    }
+
+    // ── Caller positioning ────────────────────────────────────────────────────
+
+    /// Callers at depth >1 must be positioned under their parent frame, not all
+    /// left-aligned from x=0.
+    ///
+    /// Layout:
+    ///   L0: root    (0..100)
+    ///   L1: callerA (0..60),  callerB (60..100)
+    ///   L2: target  (0..60),  target  (60..100)  ← two occurrences
+    ///
+    /// callerB is under the right half of root and must appear at x=60, not x=0.
+    #[test]
+    fn test_caller_positioning() {
+        let graph = make_fg(
+            100,
+            vec!["root", "callerA", "callerB", "target"],
+            vec![
+                vec![0, 100, 0, 0],                   // L0: root
+                vec![0, 60, 0, 1, 60, 40, 0, 2],      // L1: callerA, callerB
+                vec![0, 60, 60, 3, 60, 40, 40, 3],    // L2: target x2
+            ],
+        );
+
+        let sw = build_sandwich_view(&graph, "target", "samples".into()).unwrap();
+
+        assert_eq!(sw.target_samples, 100);
+        assert_eq!(sw.callers.len(), 2);
+
+        // Depth 0 (outermost): root credited with both occurrences.
+        let l0 = &sw.callers[0].frames;
+        assert_eq!(l0.len(), 1);
+        assert_eq!(l0[0].name, "root");
+        assert_eq!(l0[0].x_start, 0);
+        assert_eq!(l0[0].width, 100);
+
+        // Depth 1 (direct callers): callerA (60) and callerB (40).
+        let l1 = &sw.callers[1].frames;
+        assert_eq!(l1.len(), 2);
+        let a = l1.iter().find(|f| f.name == "callerA").unwrap();
+        let b = l1.iter().find(|f| f.name == "callerB").unwrap();
+        assert_eq!(a.x_start, 0);
+        assert_eq!(a.width, 60);
+        // Key: callerB must sit under root's right portion (x=60), not at x=0.
+        assert_eq!(b.x_start, 60, "callerB must be positioned within root's x-range");
+        assert_eq!(b.width, 40);
+    }
+
+    // ── Merging ───────────────────────────────────────────────────────────────
+
+    /// Same-name callee frames from different target occurrences must be merged
+    /// into a single frame with summed widths and self-samples.
+    ///
+    /// Layout:
+    ///   L0: root   (0..100)
+    ///   L1: pathA  (0..60),  pathB   (60..100)
+    ///   L2: target (0..60),  target  (60..100)
+    ///   L3: common (0..60),  common  (60..100)
+    #[test]
+    fn test_callee_merge_same_name() {
+        let graph = make_fg(
+            100,
+            vec!["root", "pathA", "pathB", "target", "common"],
+            vec![
+                vec![0, 100, 0, 0],                   // L0
+                vec![0, 60, 0, 1, 60, 40, 0, 2],      // L1: pathA, pathB
+                vec![0, 60, 0, 3, 60, 40, 0, 3],      // L2: target x2
+                vec![0, 60, 60, 4, 60, 40, 40, 4],    // L3: common x2
+            ],
+        );
+
+        let sw = build_sandwich_view(&graph, "target", "samples".into()).unwrap();
+
+        assert_eq!(sw.target_samples, 100);
+        assert_eq!(sw.callees.len(), 1);
+
+        let l0 = &sw.callees[0].frames;
+        assert_eq!(l0.len(), 1, "both 'common' frames should merge into one");
+        assert_eq!(l0[0].name, "common");
+        assert_eq!(l0[0].width, 100, "merged width should be 60+40");
+        assert_eq!(l0[0].self_samples, 100, "merged self-samples should be 60+40");
+    }
+
+    // ── Caller bottom-alignment ───────────────────────────────────────────────
+
+    /// When two parallel call paths have different depths, all direct callers
+    /// must appear at the same (bottom) level regardless of path length.
+    ///
+    /// Layout:
+    ///   L0: root  (0..100)
+    ///   L1: longPath (0..60), shortPath (60..100)
+    ///   L2: longL2   (0..60), target2   (60..100)  ← shortPath's target at L2
+    ///   L3: longL3   (0..60)
+    ///   L4: longL4   (0..60)
+    ///   L5: target1  (0..60)                        ← longPath's target at L5
+    ///
+    /// Both targets are "target". Direct callers: longL4 (for L5 target), longL3... no wait,
+    /// let me redo with clearer names.
+    ///
+    /// Direct caller of target1 (L5): longL4 at L4
+    /// Direct caller of target2 (L2): shortPath at L1
+    ///
+    /// Both longL4 and shortPath must be in callers[last] (same bottom level).
+    #[test]
+    fn test_caller_bottom_alignment() {
+        // L0: root (0..100)
+        // L1: longPath (0..60), shortPath (60..100)
+        // L2: longL2 (0..60),   target (60..100)   <- occurrence 1 (occ_level=2)
+        // L3: longL3 (0..60)
+        // L4: target (0..60)                       <- occurrence 2 (occ_level=4)
+        let graph = make_fg(
+            100,
+            vec!["root", "longPath", "shortPath", "longL2", "target", "longL3"],
+            vec![
+                vec![0, 100, 0, 0],                    // L0: root
+                vec![0, 60, 0, 1, 60, 40, 0, 2],       // L1: longPath, shortPath
+                vec![0, 60, 0, 3, 60, 40, 40, 4],      // L2: longL2, target(occ1)
+                vec![0, 60, 0, 5],                     // L3: longL3
+                vec![0, 60, 60, 4],                    // L4: target(occ2)
+            ],
+        );
+
+        let sw = build_sandwich_view(&graph, "target", "samples".into()).unwrap();
+
+        // target_samples = 40 (occ1) + 60 (occ2) = 100
+        assert_eq!(sw.target_samples, 100);
+
+        // The deepest path (longPath) has 4 levels of callers (root→longPath→longL2→longL3).
+        // The shallow path (shortPath) has 2 levels of callers (root→shortPath).
+        // With bottom-alignment both paths' direct callers must be at callers[last].
+        let last = sw.callers.len() - 1;
+        let direct_callers = &sw.callers[last];
+
+        // longL3 is the direct caller of target at L4 (occ2)
+        assert!(
+            direct_callers.frames.iter().any(|f| f.name == "longL3"),
+            "longL3 must be a direct caller at the bottom level"
+        );
+        // shortPath is the direct caller of target at L2 (occ1)
+        assert!(
+            direct_callers.frames.iter().any(|f| f.name == "shortPath"),
+            "shortPath must be a direct caller at the bottom level, same row as longL3"
+        );
+    }
+
+    // ── Caller merging ────────────────────────────────────────────────────────
+
+    /// Same-name caller frames from different target occurrences must be merged.
+    ///
+    /// Layout:
+    ///   L0: shared  (0..100)  ← same name appears once at root
+    ///   L1: pathA   (0..60),  pathB  (60..100)
+    ///   L2: target  (0..60),  target (60..100)
+    ///
+    /// "shared" is credited with 100 samples (60+40), merged into one caller frame.
+    #[test]
+    fn test_caller_merge_same_name() {
+        let graph = make_fg(
+            100,
+            vec!["shared", "pathA", "pathB", "target"],
+            vec![
+                vec![0, 100, 0, 0],                   // L0: shared (root)
+                vec![0, 60, 0, 1, 60, 40, 0, 2],      // L1: pathA, pathB
+                vec![0, 60, 60, 3, 60, 40, 40, 3],    // L2: target x2
+            ],
+        );
+
+        let sw = build_sandwich_view(&graph, "target", "samples".into()).unwrap();
+
+        assert_eq!(sw.target_samples, 100);
+        assert_eq!(sw.callers.len(), 2);
+
+        // Outermost level: shared should appear once, credited with 100.
+        let l0 = &sw.callers[0].frames;
+        assert_eq!(l0.len(), 1, "'shared' should appear as a single merged caller");
+        assert_eq!(l0[0].name, "shared");
+        assert_eq!(l0[0].width, 100);
     }
 }
