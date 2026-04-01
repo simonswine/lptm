@@ -301,17 +301,36 @@ fn render_sandwich_view(frame: &mut Frame, sw: &SandwichView, block: Block, area
         row += 1;
     }
 
-    // Target bar (full width, highlighted)
+    // Separator above target
+    if row < usable_h {
+        let sep = "─".repeat(w as usize);
+        frame.render_widget(
+            Paragraph::new(sep).style(Style::default().fg(Color::Yellow)),
+            Rect::new(inner.x, inner.y + row, inner.width, 1),
+        );
+        row += 1;
+    }
+
+    // Target bar (full width, bright yellow background)
     if row < usable_h {
         let label = center_truncate(&sw.target_name, w as usize);
         let style = Style::default()
             .fg(Color::Black)
-            .bg(frame_color(&sw.target_name))
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED);
-        let row_area = Rect::new(inner.x, inner.y + row, inner.width, 1);
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(label, style))),
-            row_area,
+            Rect::new(inner.x, inner.y + row, inner.width, 1),
+        );
+        row += 1;
+    }
+
+    // Separator below target
+    if row < usable_h {
+        let sep = "─".repeat(w as usize);
+        frame.render_widget(
+            Paragraph::new(sep).style(Style::default().fg(Color::Yellow)),
+            Rect::new(inner.x, inner.y + row, inner.width, 1),
         );
         row += 1;
     }
