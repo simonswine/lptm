@@ -301,9 +301,11 @@ fn render_sandwich_view(frame: &mut Frame, sw: &SandwichView, block: Block, area
         row += 1;
     }
 
-    // Separator above target
+    // Separator above target (labelled "Callers")
     if row < usable_h {
-        let sep = "─".repeat(w as usize);
+        let label = " Callers ";
+        let dashes = "─".repeat((w as usize).saturating_sub(label.len()));
+        let sep = format!("{label}{dashes}");
         frame.render_widget(
             Paragraph::new(sep).style(Style::default().fg(Color::Yellow)),
             Rect::new(inner.x, inner.y + row, inner.width, 1),
@@ -325,9 +327,11 @@ fn render_sandwich_view(frame: &mut Frame, sw: &SandwichView, block: Block, area
         row += 1;
     }
 
-    // Separator below target
+    // Separator below target (labelled "Callees")
     if row < usable_h {
-        let sep = "─".repeat(w as usize);
+        let label = " Callees ";
+        let dashes = "─".repeat((w as usize).saturating_sub(label.len()));
+        let sep = format!("{label}{dashes}");
         frame.render_widget(
             Paragraph::new(sep).style(Style::default().fg(Color::Yellow)),
             Rect::new(inner.x, inner.y + row, inner.width, 1),
