@@ -648,10 +648,17 @@ pub struct TimelineView {
 pub struct HeatmapView {
     pub columns: Vec<Vec<f64>>,
     pub n_buckets: usize,
+    /// Lower bound of the lowest bucket.
     pub y_min: f64,
+    /// Upper bound of the highest bucket (= y_min[-1] + bucket_step).
     pub y_max: f64,
+    /// Timestamp of the left edge of the first column (= first slot timestamp).
     pub start_ms: i64,
+    /// Timestamp of the right edge of the last column (= last slot timestamp + step_ms).
     pub end_ms: i64,
+    /// Duration of each time slot in milliseconds.
+    #[serde(default)]
+    pub step_ms: i64,
     /// Exemplars from timeline series (populated in app::view when timeline data is available).
     #[serde(default)]
     pub exemplars: Vec<TimelineExemplar>,
@@ -757,7 +764,23 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
     let first = &slots[0];
     let n_buckets = first.counts.len();
     let y_min = first.y_min.first().copied().unwrap_or(0.0);
-    let y_max = first.y_min.last().copied().unwrap_or(1.0);
+    // y_max is the upper bound of the highest bucket.
+    // y_min stores the lower bound of each bucket; the upper bound of the last
+    // bucket is lower_bound[-1] + bucket_step.
+    let y_max_lower = first.y_min.last().copied().unwrap_or(1.0);
+    let bucket_step = if first.y_min.len() >= 2 {
+        first.y_min[1] - first.y_min[0]
+    } else {
+        y_max_lower - y_min
+    };
+    let y_max = y_max_lower + bucket_step;
+
+    // Time step between slots (ms).
+    let step_ms = if slots.len() >= 2 {
+        slots[1].timestamp_ms - slots[0].timestamp_ms
+    } else {
+        0
+    };
 
     // Columns: each slot → one column; row 0 = highest bucket.
     let columns: Vec<Vec<f64>> = slots
@@ -778,13 +801,17 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
     exemplars.sort_by(|a, b| b.value.cmp(&a.value));
     let varying_label_keys = compute_varying_label_keys_exemplars(&exemplars);
 
+    let start_ms = slots.first().map(|s| s.timestamp_ms).unwrap_or(0);
+    let end_ms = slots.last().map(|s| s.timestamp_ms).unwrap_or(0) + step_ms;
+
     Some(HeatmapView {
         columns,
         n_buckets,
         y_min,
         y_max,
-        start_ms: slots.first().map(|s| s.timestamp_ms).unwrap_or(0),
-        end_ms: slots.last().map(|s| s.timestamp_ms).unwrap_or(0),
+        start_ms,
+        end_ms,
+        step_ms,
         exemplars,
         varying_label_keys,
     })

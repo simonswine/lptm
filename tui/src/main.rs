@@ -794,14 +794,17 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                         spawn_timeline_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type.clone(), service.clone(), time_range.clone(), now, w);
                                                     }
                                                 }
+                                                // For heatmaps subtract the y-axis margin (label + tick)
+                                                // so the step matches the actual graph width.
+                                                let hm_w = w.saturating_sub(12);
                                                 if vm2.pyroscope_heatmap_loading {
                                                     if let Some(ds_id) = ds_id {
-                                                        spawn_heatmap_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type.clone(), service.clone(), time_range.clone(), now, w);
+                                                        spawn_heatmap_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type.clone(), service.clone(), time_range.clone(), now, hm_w);
                                                     }
                                                 }
                                                 if vm2.pyroscope_span_heatmap_loading {
                                                     if let Some(ds_id) = ds_id {
-                                                        spawn_span_heatmap_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type, service, time_range, now, w);
+                                                        spawn_span_heatmap_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type, service, time_range, now, hm_w);
                                                     }
                                                 }
                                             }

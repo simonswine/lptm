@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
 };
 use shared::{
-    pyroscope::{HeatmapView, ProfileUnit, TimelineView},
+    pyroscope::{ProfileUnit, TimelineView},
     FlamegraphLevelView, FlamegraphView, PyroscopeSubScreenView, SandwichView, ViewModel,
 };
 
@@ -513,7 +513,7 @@ fn render_timeline(
     }
 }
 
-fn format_time_label(ms: i64) -> String {
+pub(super) fn format_time_label(ms: i64) -> String {
     let secs = ms / 1000;
     let h = (secs / 3600) % 24;
     let m = (secs / 60) % 60;
@@ -564,7 +564,7 @@ fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect
             Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(chart_area);
         let sel_exemplar = hm.exemplars.get(vm.pyroscope_exemplar_index);
         let hm_highlight = sel_exemplar.map(|e| (e.timestamp_ms, e.value as f64));
-        render_heatmap(frame, hm, block, vis_area, unit, hm_highlight, blink_on);
+        super::heatmap::render_heatmap(frame, hm, block, vis_area, unit, hm_highlight, blink_on);
         render_exemplars(frame, &exemplars, &hm.varying_label_keys, table_area, unit, vm.pyroscope_exemplar_index);
     } else {
         frame.render_widget(
@@ -574,69 +574,6 @@ fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect
             chart_area,
         );
     }
-}
-
-fn render_heatmap(
-    frame: &mut Frame,
-    hm: &HeatmapView,
-    block: Block,
-    area: Rect,
-    unit: ProfileUnit,
-    highlight: Option<(i64, f64)>,
-    blink_on: bool,
-) {
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.height < 2 || inner.width == 0 || hm.columns.is_empty() || hm.n_buckets == 0 {
-        return;
-    }
-
-    let usable_h = (inner.height - 1) as usize;
-    let w = inner.width as usize;
-    let n_cols = hm.columns.len();
-
-    for row in 0..usable_h {
-        let bucket_idx = row * hm.n_buckets / usable_h;
-        let row_area = Rect::new(inner.x, inner.y + row as u16, inner.width, 1);
-
-        let spans: Vec<Span> = (0..w)
-            .map(|col| {
-                let slot_start = col * n_cols / w;
-                let slot_end = ((col + 1) * n_cols / w).max(slot_start + 1).min(n_cols);
-                let intensity = hm.columns[slot_start..slot_end]
-                    .iter()
-                    .filter_map(|c| c.get(bucket_idx).copied())
-                    .fold(0.0_f64, f64::max);
-                Span::styled(" ", Style::default().bg(heatmap_color(intensity)))
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
-    }
-
-    // Overlay blinking marker at the selected exemplar's position.
-    if let Some((ts_ms, value)) = highlight {
-        let time_span = (hm.end_ms - hm.start_ms).max(1) as f64;
-        let col = ((ts_ms - hm.start_ms) as f64 / time_span * w as f64) as u16;
-        let y_span = (hm.y_max - hm.y_min).max(f64::EPSILON);
-        let bucket_frac = (value - hm.y_min) / y_span;
-        let row = ((1.0 - bucket_frac.clamp(0.0, 1.0)) * usable_h as f64) as u16;
-        let col = col.min(w as u16 - 1);
-        let row = row.min(usable_h as u16 - 1);
-        if blink_on {
-            frame.render_widget(
-                Paragraph::new(" ").style(Style::default().bg(Color::Magenta)),
-                Rect::new(inner.x + col, inner.y + row, 1, 1),
-            );
-        }
-    }
-
-    let status = format!(" y: {} – {}", unit.format(hm.y_min), unit.format(hm.y_max));
-    let status_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-    frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(Color::Cyan)),
-        status_area,
-    );
 }
 
 fn render_timeline_exemplars(
@@ -729,7 +666,7 @@ fn render_exemplars(
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
-fn heatmap_color(v: f64) -> Color {
+pub(super) fn heatmap_color(v: f64) -> Color {
     const COLORS: &[Color] = &[
         Color::Black,
         Color::Rgb(0, 0, 96),
