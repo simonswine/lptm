@@ -1,5 +1,5 @@
 mod client;
-mod heatmap;
+pub mod heatmap;
 mod ui;
 
 pub use client::PyroscopeClient;

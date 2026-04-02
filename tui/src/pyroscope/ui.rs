@@ -11,11 +11,18 @@ use shared::{
     FlamegraphLevelView, FlamegraphView, PyroscopeSubScreenView, SandwichView, ViewModel,
 };
 
-pub fn render_pyroscope_mode(frame: &mut Frame, vm: &ViewModel, area: Rect, blink_on: bool) {
+/// Render pyroscope mode. Returns the heatmap layout if a heatmap screen was
+/// rendered (used by the caller for mouse hit-testing).
+pub fn render_pyroscope_mode(
+    frame: &mut Frame,
+    vm: &ViewModel,
+    area: Rect,
+    blink_on: bool,
+) -> Option<super::heatmap::HeatmapLayout> {
     match vm.pyroscope_sub_screen {
-        PyroscopeSubScreenView::ServiceList => render_pyroscope_service_list(frame, vm, area),
-        PyroscopeSubScreenView::Flamegraph => render_pyroscope_flamegraph_screen(frame, vm, area),
-        PyroscopeSubScreenView::Timeline => render_pyroscope_timeline_screen(frame, vm, area, blink_on),
+        PyroscopeSubScreenView::ServiceList => { render_pyroscope_service_list(frame, vm, area); None }
+        PyroscopeSubScreenView::Flamegraph => { render_pyroscope_flamegraph_screen(frame, vm, area); None }
+        PyroscopeSubScreenView::Timeline => { render_pyroscope_timeline_screen(frame, vm, area, blink_on); None }
         PyroscopeSubScreenView::ProfileHeatmap => render_pyroscope_heatmap_screen(frame, vm, area, false, blink_on),
         PyroscopeSubScreenView::SpanHeatmap => render_pyroscope_heatmap_screen(frame, vm, area, true, blink_on),
     }
@@ -521,7 +528,13 @@ pub(super) fn format_time_label(ms: i64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect, span: bool, blink_on: bool) {
+fn render_pyroscope_heatmap_screen(
+    frame: &mut Frame,
+    vm: &ViewModel,
+    area: Rect,
+    span: bool,
+    blink_on: bool,
+) -> Option<super::heatmap::HeatmapLayout> {
     let [info_area, tabs_area, chart_area] =
         Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)]).areas(area);
     render_profile_header(frame, vm, info_area);
@@ -546,7 +559,7 @@ fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect
     let block = Block::default().borders(Borders::ALL).title(title);
     if loading {
         frame.render_widget(Paragraph::new("Loading…").block(block), chart_area);
-        return;
+        return None;
     }
     if let Some(err) = error {
         frame.render_widget(
@@ -555,7 +568,7 @@ fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect
                 .block(block),
             chart_area,
         );
-        return;
+        return None;
     }
     if let Some(hm) = heatmap_data {
         let unit = ProfileUnit::from_profile_type_id(&vm.pyroscope_selected_profile_type);
@@ -564,8 +577,9 @@ fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect
             Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(chart_area);
         let sel_exemplar = hm.exemplars.get(vm.pyroscope_exemplar_index);
         let hm_highlight = sel_exemplar.map(|e| (e.timestamp_ms, e.value as f64));
-        super::heatmap::render_heatmap(frame, hm, block, vis_area, unit, hm_highlight, blink_on);
+        let layout = super::heatmap::render_heatmap(frame, hm, block, vis_area, unit, hm_highlight, blink_on);
         render_exemplars(frame, &exemplars, &hm.varying_label_keys, table_area, unit, vm.pyroscope_exemplar_index);
+        layout
     } else {
         frame.render_widget(
             Paragraph::new("No heatmap data.")
@@ -573,6 +587,7 @@ fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect
                 .block(block),
             chart_area,
         );
+        None
     }
 }
 

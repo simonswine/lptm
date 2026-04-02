@@ -11,7 +11,11 @@ use clap::Parser;
 use log::info;
 use serde::{Deserialize, Serialize};
 use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};
-use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, EventStream, KeyCode,
+    KeyModifiers, MouseButton, MouseEventKind,
+};
+use crossterm::execute;
 use futures::StreamExt;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -198,7 +202,9 @@ async fn main() -> Result<()> {
 
     info!("grafex starting – url={}", args.grafana_url);
     let mut terminal = ratatui::init();
+    let _ = execute!(std::io::stderr(), EnableMouseCapture);
     let result = run(&mut terminal, args).await;
+    let _ = execute!(std::io::stderr(), DisableMouseCapture);
     ratatui::restore();
     info!("grafex exiting");
     result
@@ -240,6 +246,25 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
 
     let (pyroscope_tx, mut pyroscope_rx) = mpsc::unbounded_channel::<PyroscopeMsg>();
 
+    // Heatmap mouse state: last rendered layout + raw slots for popup construction.
+    let mut heatmap_layout: Option<pyroscope::heatmap::HeatmapLayout> = None;
+    let mut heatmap_slots: Vec<shared::pyroscope::HeatmapSlot> = Vec::new();
+    let mut span_heatmap_slots: Vec<shared::pyroscope::HeatmapSlot> = Vec::new();
+    let mut heatmap_popup: Option<pyroscope::heatmap::HeatmapPopup> = None;
+
+    // Helper: draw the UI, capturing the heatmap layout returned by the render.
+    macro_rules! draw {
+        ($term:expr, $vm:expr, $popup:expr) => {{
+            let mut captured_layout: Option<pyroscope::heatmap::HeatmapLayout> = None;
+            $term.draw(|frame| {
+                captured_layout = ui(frame, $vm, $popup);
+            })?;
+            if captured_layout.is_some() {
+                heatmap_layout = captured_layout;
+            }
+        }};
+    }
+
     loop {
         tokio::select! {
             Some(msg) = pyroscope_rx.recv() => {
@@ -254,9 +279,15 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                         app_core.update(Event::PyroscopeTimelineLoaded(result));
                     }
                     PyroscopeMsg::Heatmap(result) => {
+                        if let Ok(ref slots) = result {
+                            heatmap_slots = slots.clone();
+                        }
                         app_core.update(Event::PyroscopeHeatmapLoaded(result));
                     }
                     PyroscopeMsg::SpanHeatmap(result) => {
+                        if let Ok(ref slots) = result {
+                            span_heatmap_slots = slots.clone();
+                        }
                         app_core.update(Event::PyroscopeSpanHeatmapLoaded(result));
                     }
                 }
@@ -863,14 +894,54 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                     CrosstermEvent::Resize(w, _) => {
                         app_core.update(Event::FlamegraphViewportChars(w.saturating_sub(2) as u64));
                         let vm = app_core.core.view();
-                        terminal.draw(|frame| ui(frame, &vm))?;
+                        draw!(terminal, &vm, &heatmap_popup);
+                        
+                    }
+                    CrosstermEvent::Mouse(me) => {
+                        if me.kind == MouseEventKind::Down(MouseButton::Left) {
+                            let vm = app_core.core.view();
+                            let is_heatmap = matches!(
+                                vm.pyroscope_sub_screen,
+                                PyroscopeSubScreenView::ProfileHeatmap | PyroscopeSubScreenView::SpanHeatmap
+                            );
+                            if is_heatmap {
+                                if let Some(ref layout) = heatmap_layout {
+                                    let slots = if vm.pyroscope_sub_screen == PyroscopeSubScreenView::SpanHeatmap {
+                                        &span_heatmap_slots
+                                    } else {
+                                        &heatmap_slots
+                                    };
+                                    let hm_view = if vm.pyroscope_sub_screen == PyroscopeSubScreenView::SpanHeatmap {
+                                        vm.span_heatmap.as_ref()
+                                    } else {
+                                        vm.heatmap.as_ref()
+                                    };
+                                    if let Some(hm) = hm_view {
+                                        let new_popup = pyroscope::heatmap::HeatmapPopup::from_click(
+                                            me.column, me.row, layout, hm, slots,
+                                        );
+                                        if new_popup.is_some() {
+                                            heatmap_popup = new_popup;
+                                        } else {
+                                            heatmap_popup = None;
+                                        }
+                                    }
+                                }
+                                let vm = app_core.core.view();
+                                draw!(terminal, &vm, &heatmap_popup);
+                            }
+                        } else if me.kind == MouseEventKind::Down(MouseButton::Right) {
+                            heatmap_popup = None;
+                            let vm = app_core.core.view();
+                            draw!(terminal, &vm, &heatmap_popup);
+                        }
                     }
                     _ => {}
                 }
             }
             Some(()) = render_rx.recv() => {
                 let vm = app_core.core.view();
-                terminal.draw(|frame| ui(frame, &vm))?;
+                draw!(terminal, &vm, &heatmap_popup);
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                 // Drive blinking exemplar marker: only redraw when relevant.
@@ -884,7 +955,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                     || vm.heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty())
                     || vm.span_heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty()));
                 if needs_blink {
-                    terminal.draw(|frame| ui(frame, &vm))?;
+                    draw!(terminal, &vm, &heatmap_popup);
                 }
             }
         }
@@ -901,7 +972,11 @@ fn blink_on() -> bool {
         < 500
 }
 
-fn ui(frame: &mut Frame, vm: &ViewModel) {
+fn ui(
+    frame: &mut Frame,
+    vm: &ViewModel,
+    popup: &Option<pyroscope::heatmap::HeatmapPopup>,
+) -> Option<pyroscope::heatmap::HeatmapLayout> {
     let area = frame.area();
 
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
@@ -955,9 +1030,17 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
             let split =
                 Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
             render_datasource_bar(frame, vm, split[0]);
-            pyroscope::render_pyroscope_mode(frame, vm, split[1], blink_on());
+            let layout = pyroscope::render_pyroscope_mode(frame, vm, split[1], blink_on());
+            if let Some(p) = popup {
+                let unit = shared::pyroscope::ProfileUnit::from_profile_type_id(
+                    &vm.pyroscope_selected_profile_type,
+                );
+                p.render(frame, frame.area(), unit);
+            }
+            return layout;
         }
     }
+    None
 }
 
 fn render_datasource_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {

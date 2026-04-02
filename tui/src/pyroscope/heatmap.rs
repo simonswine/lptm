@@ -1,13 +1,131 @@
+use log::debug;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
-use shared::pyroscope::{HeatmapView, ProfileUnit};
+use shared::pyroscope::{HeatmapSlot, HeatmapView, ProfileUnit};
 
 use super::ui::{format_time_label, heatmap_color};
+
+/// Data captured from a single heatmap cell click.
+#[derive(Debug, Clone)]
+pub struct HeatmapPopup {
+    /// Screen position of the click (used to anchor the popup).
+    pub screen_x: u16,
+    pub screen_y: u16,
+    /// Time range of the clicked slot.
+    pub slot_start_ms: i64,
+    pub slot_end_ms: i64,
+    /// Value range of the clicked bucket.
+    pub bucket_y_min: f64,
+    pub bucket_y_max: f64,
+    /// Raw count in this bucket/slot cell.
+    pub count: i32,
+}
+
+impl HeatmapPopup {
+    /// Construct from a click at `(screen_x, screen_y)`, given the layout,
+    /// heatmap view, and raw slots.
+    pub fn from_click(
+        screen_x: u16,
+        screen_y: u16,
+        layout: &HeatmapLayout,
+        hm: &HeatmapView,
+        slots: &[HeatmapSlot],
+    ) -> Option<Self> {
+        let (slot_idx, bucket_idx) = layout.cell_to_slot_bucket(screen_x, screen_y, hm)?;
+        let slot = slots.get(slot_idx)?;
+
+        debug!(
+            "heatmap click: screen=({},{}) slot_idx={} bucket_idx={} n_slots={} n_buckets={}",
+            screen_x, screen_y, slot_idx, bucket_idx, slots.len(), hm.n_buckets,
+        );
+        for (i, s) in slots.iter().enumerate() {
+            debug!(
+                "  slot[{}] ts={} counts={:?} y_min={:?}",
+                i, s.timestamp_ms, s.counts, s.y_min
+            );
+        }
+
+        let count = *slot.counts.get(bucket_idx)?;
+        let bucket_y_min = slot.y_min.get(bucket_idx).copied()?;
+        let bucket_step = if slot.y_min.len() >= 2 {
+            slot.y_min[1] - slot.y_min[0]
+        } else {
+            0.0
+        };
+        Some(HeatmapPopup {
+            screen_x,
+            screen_y,
+            slot_start_ms: slot.timestamp_ms,
+            slot_end_ms: slot.timestamp_ms + hm.step_ms,
+            bucket_y_min,
+            bucket_y_max: bucket_y_min + bucket_step,
+            count,
+        })
+    }
+
+    pub fn render(&self, frame: &mut Frame, frame_area: Rect, unit: ProfileUnit) {
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("time:  ", Style::default().fg(Color::DarkGray)),
+                Span::raw(format!(
+                    "{} – {}",
+                    format_time_label(self.slot_start_ms),
+                    format_time_label(self.slot_end_ms)
+                )),
+            ]),
+            Line::from(vec![
+                Span::styled("value: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(format!(
+                    "{} – {}",
+                    unit.format(self.bucket_y_min),
+                    unit.format(self.bucket_y_max)
+                )),
+            ]),
+            Line::from(vec![
+                Span::styled("count: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    self.count.to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]),
+        ];
+
+        let popup_w = lines
+            .iter()
+            .map(|l| l.width())
+            .max()
+            .unwrap_or(20) as u16
+            + 4; // padding + borders
+        let popup_h = lines.len() as u16 + 2; // borders
+
+        // Place popup to the right and below the click, flipping if it would
+        // overflow the frame.
+        let popup_x = if self.screen_x + popup_w + 1 <= frame_area.right() {
+            self.screen_x + 1
+        } else {
+            self.screen_x.saturating_sub(popup_w)
+        };
+        let popup_y = if self.screen_y + popup_h <= frame_area.bottom() {
+            self.screen_y
+        } else {
+            self.screen_y.saturating_sub(popup_h)
+        };
+        let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+        frame.render_widget(Clear, popup_area);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).title(" Cell "))
+                .style(Style::default().fg(Color::White)),
+            popup_area,
+        );
+    }
+}
 
 /// The pixel-space geometry of the graph area within a heatmap widget.
 /// All coordinates are in terminal cells, relative to the frame origin.
@@ -73,6 +191,48 @@ impl HeatmapLayout {
         let value = hm.y_min + (1.0 - row as f64 / h) * y_span;
         (ts_ms, value)
     }
+
+    /// Map a terminal cell to (slot_index, bucket_index) in the HeatmapView.
+    /// Returns `None` if the cell is outside the graph area or the indices are
+    /// out of range.
+    /// Map a screen click to `(slot_index, bucket_index)` where both indices
+    /// are into the **raw** `HeatmapSlot` arrays (`counts`, `y_min`), i.e.
+    /// index 0 = lowest-value bucket, index n_buckets-1 = highest-value bucket.
+    pub fn cell_to_slot_bucket(
+        &self,
+        screen_x: u16,
+        screen_y: u16,
+        hm: &HeatmapView,
+    ) -> Option<(usize, usize)> {
+        // Check that the click is within the graph area.
+        if screen_x < self.graph_x
+            || screen_x >= self.graph_x + self.graph_w
+            || screen_y < self.graph_y
+            || screen_y >= self.graph_y + self.graph_h
+        {
+            return None;
+        }
+        let col = (screen_x - self.graph_x) as usize;
+        let row = (screen_y - self.graph_y) as usize;
+        let w = self.graph_w as usize;
+        let h = self.graph_h as usize;
+        let n_cols = hm.columns.len();
+
+        // Slot: same mapping as the renderer (col * n_cols / w).
+        let slot_idx = (col * n_cols / w).min(n_cols.saturating_sub(1));
+
+        // The renderer uses `bucket_idx = row * n_buckets / h` as an index into
+        // `hm.columns[slot][bucket_idx]`. The columns were built with `.rev()` in
+        // `build_heatmap_view`, so column index 0 = highest-value bucket and
+        // column index n_buckets-1 = lowest-value bucket.
+        //
+        // `slot.counts` and `slot.y_min` are in forward order (index 0 = lowest).
+        // We must therefore invert the bucket axis when mapping back to raw data.
+        let col_bucket_idx = (row * hm.n_buckets / h).min(hm.n_buckets.saturating_sub(1));
+        let raw_bucket_idx = hm.n_buckets.saturating_sub(1) - col_bucket_idx;
+
+        Some((slot_idx, raw_bucket_idx))
+    }
 }
 
 /// Compute the y-axis label width needed for a heatmap view.
@@ -83,27 +243,30 @@ pub fn y_label_width(hm: &HeatmapView, unit: ProfileUnit, max_width: u16) -> u16
     w.min(max_width / 3)
 }
 
+/// Render the heatmap and return the `HeatmapLayout` so the caller can perform
+/// hit-testing on subsequent mouse events. Returns `None` if the area is too
+/// small to render.
 pub fn render_heatmap(
     frame: &mut Frame,
     hm: &HeatmapView,
-    block: ratatui::widgets::Block,
+    block: Block,
     area: Rect,
     unit: ProfileUnit,
     highlight: Option<(i64, f64)>,
     blink_on: bool,
-) {
+) -> Option<HeatmapLayout> {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if inner.height < 4 || inner.width < 4 || hm.columns.is_empty() || hm.n_buckets == 0 {
-        return;
+        return None;
     }
 
     let y_top_label = unit.format(hm.y_max);
     let y_bot_label = unit.format(hm.y_min);
     let y_label_w = y_label_width(hm, unit, inner.width);
 
-    let Some(layout) = HeatmapLayout::from_inner(inner, y_label_w) else { return };
+    let Some(layout) = HeatmapLayout::from_inner(inner, y_label_w) else { return None };
     let HeatmapLayout { graph_x, graph_y, graph_w, graph_h } = layout;
 
     let n_cols = hm.columns.len();
@@ -180,6 +343,8 @@ pub fn render_heatmap(
             );
         }
     }
+
+    Some(layout)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -306,6 +471,45 @@ mod tests {
         assert_eq!(hm.start_ms, 0);
         assert_eq!(hm.end_ms, 2 * step, "end_ms must be last_slot_ts + step_ms");
         assert_eq!(hm.step_ms, step);
+    }
+
+    #[test]
+    fn bucket_reversal_top_row_is_highest_bucket() {
+        // The renderer builds columns with .rev() so column[0] = highest bucket.
+        // A click on row 0 (top) must map back to the highest raw bucket index.
+        let n_buckets = 10usize;
+        let hm = make_heatmap(5, n_buckets, 1000);
+        let (layout, _) = make_layout(50, 20);
+
+        // Click at the very top of the graph area.
+        let screen_x = layout.graph_x;
+        let screen_y = layout.graph_y;
+        let (_slot, bucket) = layout.cell_to_slot_bucket(screen_x, screen_y, &hm).unwrap();
+        assert_eq!(
+            bucket,
+            n_buckets - 1,
+            "top row should map to highest raw bucket (index {}), got {}",
+            n_buckets - 1,
+            bucket
+        );
+    }
+
+    #[test]
+    fn bucket_reversal_bottom_row_is_lowest_bucket() {
+        let n_buckets = 10usize;
+        let hm = make_heatmap(5, n_buckets, 1000);
+        let (layout, _) = make_layout(50, 20);
+
+        // Click at the very bottom row of the graph area.
+        let screen_x = layout.graph_x;
+        let screen_y = layout.graph_y + layout.graph_h - 1;
+        let (_slot, bucket) = layout.cell_to_slot_bucket(screen_x, screen_y, &hm).unwrap();
+        assert_eq!(
+            bucket,
+            0,
+            "bottom row should map to lowest raw bucket (index 0), got {}",
+            bucket
+        );
     }
 
     #[test]
