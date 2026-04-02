@@ -114,14 +114,20 @@ impl PyroscopeClient {
         start: i64,
         end: i64,
         step_s: f64,
+        span: bool,
     ) -> Result<Vec<TimelineSeries>> {
+        let exemplar_type = if span {
+            ExemplarType::EXEMPLAR_TYPE_SPAN
+        } else {
+            ExemplarType::EXEMPLAR_TYPE_INDIVIDUAL
+        };
         let req = SelectSeriesRequest {
             profile_typeID: profile_type_id.into(),
             label_selector: format!("{{service_name=\"{service}\"}}"),
             start,
             end,
             step: step_s,
-            exemplar_type: ExemplarType::EXEMPLAR_TYPE_INDIVIDUAL.into(),
+            exemplar_type: exemplar_type.into(),
             ..SelectSeriesRequest::default()
         };
         let resp: SelectSeriesResponse = self.post("SelectSeries", &req).await?;
@@ -155,14 +161,26 @@ impl PyroscopeClient {
         start: i64,
         end: i64,
         step_s: f64,
+        span: bool,
     ) -> Result<Vec<HeatmapSlot>> {
+        let query_type = if span {
+            HeatmapQueryType::HEATMAP_QUERY_TYPE_SPAN
+        } else {
+            HeatmapQueryType::HEATMAP_QUERY_TYPE_INDIVIDUAL
+        };
+        let exemplar_type = if span {
+            ExemplarType::EXEMPLAR_TYPE_SPAN
+        } else {
+            ExemplarType::EXEMPLAR_TYPE_INDIVIDUAL
+        };
         let req = SelectHeatmapRequest {
             profile_typeID: profile_type_id.into(),
             label_selector: format!("{{service_name=\"{service}\"}}"),
             start,
             end,
             step: step_s,
-            query_type: HeatmapQueryType::HEATMAP_QUERY_TYPE_INDIVIDUAL.into(),
+            query_type: query_type.into(),
+            exemplar_type: exemplar_type.into(),
             ..SelectHeatmapRequest::default()
         };
         let resp: SelectHeatmapResponse = self.post("SelectHeatmap", &req).await?;
@@ -175,6 +193,17 @@ impl PyroscopeClient {
                 timestamp_ms: slot.timestamp,
                 y_min: slot.y_min,
                 counts: slot.counts,
+                exemplars: slot
+                    .exemplars
+                    .iter()
+                    .map(|e| shared::pyroscope::TimelineExemplar {
+                        labels: e.labels.iter().map(|l| (l.name.clone(), l.value.clone())).collect(),
+                        profile_id: e.profile_id.clone(),
+                        span_id: e.span_id.clone(),
+                        value: e.value,
+                        timestamp_ms: e.timestamp,
+                    })
+                    .collect(),
             })
             .collect();
         Ok(slots)

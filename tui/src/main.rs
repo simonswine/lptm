@@ -209,6 +209,7 @@ enum PyroscopeMsg {
     Flamegraph(Result<Option<shared::pyroscope::FlameGraph>, String>),
     Timeline(Result<Vec<shared::pyroscope::TimelineSeries>, String>),
     Heatmap(Result<Vec<shared::pyroscope::HeatmapSlot>, String>),
+    SpanHeatmap(Result<Vec<shared::pyroscope::HeatmapSlot>, String>),
 }
 
 async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
@@ -254,6 +255,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                     }
                     PyroscopeMsg::Heatmap(result) => {
                         app_core.update(Event::PyroscopeHeatmapLoaded(result));
+                    }
+                    PyroscopeMsg::SpanHeatmap(result) => {
+                        app_core.update(Event::PyroscopeSpanHeatmapLoaded(result));
                     }
                 }
             }
@@ -747,12 +751,16 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                             }
                                         }
                                     }
-                                    PyroscopeSubScreenView::Flamegraph => {
-                                        match key.code {
-                                            KeyCode::Esc if vm.sandwich_view.is_some() => {
+                                    PyroscopeSubScreenView::Flamegraph
+                                    | PyroscopeSubScreenView::Timeline
+                                    | PyroscopeSubScreenView::ProfileHeatmap
+                                    | PyroscopeSubScreenView::SpanHeatmap => {
+                                        match (&vm.pyroscope_sub_screen, key.code) {
+                                            // Back to service list
+                                            (PyroscopeSubScreenView::Flamegraph, KeyCode::Esc) if vm.sandwich_view.is_some() => {
                                                 app_core.update(Event::FlameSandwichClear);
                                             }
-                                            KeyCode::Esc | KeyCode::Char('q') => {
+                                            (_, KeyCode::Esc) | (_, KeyCode::Char('q')) => {
                                                 let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
                                                 let time_range = vm.pyroscope_time_range.clone();
                                                 let now = now_unix_secs() as i64 * 1000;
@@ -764,74 +772,83 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                     }
                                                 }
                                             }
-                                            KeyCode::Tab => {
+                                            // Tab cycles forward through views
+                                            (_, KeyCode::Tab) => {
+                                                let current = match vm.pyroscope_sub_screen {
+                                                    PyroscopeSubScreenView::Flamegraph => 0,
+                                                    PyroscopeSubScreenView::Timeline => 1,
+                                                    PyroscopeSubScreenView::ProfileHeatmap => 2,
+                                                    _ => 3,
+                                                };
+                                                let next = (current + 1) % 4;
                                                 let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
                                                 let service = vm.pyroscope_selected_service.clone();
                                                 let profile_type = vm.pyroscope_selected_profile_type.clone();
                                                 let time_range = vm.pyroscope_time_range.clone();
                                                 let now = now_unix_secs() as i64 * 1000;
-                                                app_core.update(Event::PyroscopeCycleView);
+                                                app_core.update(Event::PyroscopeSelectView(next));
                                                 let vm2 = app_core.core.view();
+                                                let w = terminal.size().map(|s| s.width.saturating_sub(2)).unwrap_or(120);
                                                 if vm2.pyroscope_timeline_loading {
                                                     if let Some(ds_id) = ds_id {
-                                                        let w = terminal.size().map(|s| s.width.saturating_sub(2)).unwrap_or(120);
-                                                        spawn_timeline_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type, service, time_range, now, w);
+                                                        spawn_timeline_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type.clone(), service.clone(), time_range.clone(), now, w);
                                                     }
                                                 }
-                                            }
-                                            KeyCode::Left | KeyCode::Char('h') => {
-                                                app_core.update(Event::FlameMoveLeft);
-                                            }
-                                            KeyCode::Right | KeyCode::Char('l') => {
-                                                app_core.update(Event::FlameMoveRight);
-                                            }
-                                            KeyCode::Up | KeyCode::Char('k') => {
-                                                app_core.update(Event::FlameMoveDown);
-                                            }
-                                            KeyCode::Down | KeyCode::Char('j') => {
-                                                app_core.update(Event::FlameMoveUp);
-                                            }
-                                            KeyCode::Enter | KeyCode::Char('z') => {
-                                                app_core.update(Event::FlameZoomIn);
-                                            }
-                                            KeyCode::Backspace | KeyCode::Char('o') => {
-                                                app_core.update(Event::FlameZoomOut);
-                                            }
-                                            KeyCode::Char('s') => {
-                                                app_core.update(Event::FlameSandwich);
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    PyroscopeSubScreenView::Timeline
-                                    | PyroscopeSubScreenView::Heatmap => {
-                                        match key.code {
-                                            KeyCode::Esc | KeyCode::Char('q') => {
-                                                let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
-                                                let time_range = vm.pyroscope_time_range.clone();
-                                                let now = now_unix_secs() as i64 * 1000;
-                                                app_core.update(Event::BackToServiceList);
-                                                let vm2 = app_core.core.view();
-                                                if vm2.pyroscope_series_loading {
-                                                    if let Some(ds_id) = ds_id {
-                                                        spawn_series_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), time_range, now);
-                                                    }
-                                                }
-                                            }
-                                            KeyCode::Tab => {
-                                                let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
-                                                let service = vm.pyroscope_selected_service.clone();
-                                                let profile_type = vm.pyroscope_selected_profile_type.clone();
-                                                let time_range = vm.pyroscope_time_range.clone();
-                                                let now = now_unix_secs() as i64 * 1000;
-                                                app_core.update(Event::PyroscopeCycleView);
-                                                let vm2 = app_core.core.view();
                                                 if vm2.pyroscope_heatmap_loading {
                                                     if let Some(ds_id) = ds_id {
-                                                        let w = terminal.size().map(|s| s.width.saturating_sub(2)).unwrap_or(120);
-                                                        spawn_heatmap_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type, service, time_range, now, w);
+                                                        spawn_heatmap_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type.clone(), service.clone(), time_range.clone(), now, w);
                                                     }
                                                 }
+                                                if vm2.pyroscope_span_heatmap_loading {
+                                                    if let Some(ds_id) = ds_id {
+                                                        spawn_span_heatmap_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type, service, time_range, now, w);
+                                                    }
+                                                }
+                                            }
+                                            // Flamegraph-only keys
+                                            (PyroscopeSubScreenView::Flamegraph, KeyCode::Left)
+                                            | (PyroscopeSubScreenView::Flamegraph, KeyCode::Char('h')) => {
+                                                app_core.update(Event::FlameMoveLeft);
+                                            }
+                                            (PyroscopeSubScreenView::Flamegraph, KeyCode::Right)
+                                            | (PyroscopeSubScreenView::Flamegraph, KeyCode::Char('l')) => {
+                                                app_core.update(Event::FlameMoveRight);
+                                            }
+                                            (PyroscopeSubScreenView::Flamegraph, KeyCode::Up)
+                                            | (PyroscopeSubScreenView::Flamegraph, KeyCode::Char('k')) => {
+                                                app_core.update(Event::FlameMoveDown);
+                                            }
+                                            (PyroscopeSubScreenView::Flamegraph, KeyCode::Down)
+                                            | (PyroscopeSubScreenView::Flamegraph, KeyCode::Char('j')) => {
+                                                app_core.update(Event::FlameMoveUp);
+                                            }
+                                            (PyroscopeSubScreenView::Flamegraph, KeyCode::Enter)
+                                            | (PyroscopeSubScreenView::Flamegraph, KeyCode::Char('z')) => {
+                                                app_core.update(Event::FlameZoomIn);
+                                            }
+                                            (PyroscopeSubScreenView::Flamegraph, KeyCode::Backspace)
+                                            | (PyroscopeSubScreenView::Flamegraph, KeyCode::Char('o')) => {
+                                                app_core.update(Event::FlameZoomOut);
+                                            }
+                                            (PyroscopeSubScreenView::Flamegraph, KeyCode::Char('s')) => {
+                                                app_core.update(Event::FlameSandwich);
+                                            }
+                                            // Exemplar navigation on Timeline/Heatmap screens
+                                            (PyroscopeSubScreenView::Timeline, KeyCode::Down)
+                                            | (PyroscopeSubScreenView::Timeline, KeyCode::Char('j'))
+                                            | (PyroscopeSubScreenView::ProfileHeatmap, KeyCode::Down)
+                                            | (PyroscopeSubScreenView::ProfileHeatmap, KeyCode::Char('j'))
+                                            | (PyroscopeSubScreenView::SpanHeatmap, KeyCode::Down)
+                                            | (PyroscopeSubScreenView::SpanHeatmap, KeyCode::Char('j')) => {
+                                                app_core.update(Event::ExemplarSelectNext);
+                                            }
+                                            (PyroscopeSubScreenView::Timeline, KeyCode::Up)
+                                            | (PyroscopeSubScreenView::Timeline, KeyCode::Char('k'))
+                                            | (PyroscopeSubScreenView::ProfileHeatmap, KeyCode::Up)
+                                            | (PyroscopeSubScreenView::ProfileHeatmap, KeyCode::Char('k'))
+                                            | (PyroscopeSubScreenView::SpanHeatmap, KeyCode::Up)
+                                            | (PyroscopeSubScreenView::SpanHeatmap, KeyCode::Char('k')) => {
+                                                app_core.update(Event::ExemplarSelectPrev);
                                             }
                                             _ => {}
                                         }
@@ -852,10 +869,33 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                 let vm = app_core.core.view();
                 terminal.draw(|frame| ui(frame, &vm))?;
             }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                // Drive blinking exemplar marker: only redraw when relevant.
+                let vm = app_core.core.view();
+                let needs_blink = matches!(
+                    vm.pyroscope_sub_screen,
+                    PyroscopeSubScreenView::Timeline
+                    | PyroscopeSubScreenView::ProfileHeatmap
+                    | PyroscopeSubScreenView::SpanHeatmap
+                ) && (vm.timeline.as_ref().map_or(false, |t| !t.exemplars.is_empty())
+                    || vm.heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty())
+                    || vm.span_heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty()));
+                if needs_blink {
+                    terminal.draw(|frame| ui(frame, &vm))?;
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+fn blink_on() -> bool {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_millis()
+        < 500
 }
 
 fn ui(frame: &mut Frame, vm: &ViewModel) {
@@ -881,16 +921,15 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
                 "Esc: Back/Clear  j/k: Next/Prev  Enter: Select  t: Time Range  p: Profile Type  /: Filter"
             }
             PyroscopeSubScreenView::Flamegraph if vm.sandwich_view.is_some() => {
-                "Esc/s: Exit Sandwich  Tab: Timeline  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller"
+                "Esc/s: Exit Sandwich  Tab: Switch View  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller"
             }
             PyroscopeSubScreenView::Flamegraph => {
-                "Esc: List  Tab: Timeline  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller  Enter/z: Zoom In  o: Zoom Out  s: Sandwich"
+                "Esc: List  Tab: Switch View  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller  Enter/z: Zoom In  o: Zoom Out  s: Sandwich"
             }
-            PyroscopeSubScreenView::Timeline => {
-                "Esc: List  Tab: Heatmap"
-            }
-            PyroscopeSubScreenView::Heatmap => {
-                "Esc: List  Tab: Flamegraph"
+            PyroscopeSubScreenView::Timeline
+            | PyroscopeSubScreenView::ProfileHeatmap
+            | PyroscopeSubScreenView::SpanHeatmap => {
+                "Esc: List  Tab: Switch View  j/k: Exemplar Next/Prev"
             }
         },
     };
@@ -913,7 +952,7 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
             let split =
                 Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
             render_datasource_bar(frame, vm, split[0]);
-            pyroscope::render_pyroscope_mode(frame, vm, split[1]);
+            pyroscope::render_pyroscope_mode(frame, vm, split[1], blink_on());
         }
     }
 }
@@ -1196,12 +1235,11 @@ fn spawn_timeline_fetch(
     tokio::spawn(async move {
         let window_s = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as f64;
         let window_ms = (window_s * 1000.0) as i64;
-        // One data point per terminal column for a smooth connected line.
         let cols = chart_width.max(20) as f64;
         let step_s = (window_s / cols).max(15.0);
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client
-            .select_series(&profile_type, &service, now_ms - window_ms, now_ms, step_s)
+            .select_series(&profile_type, &service, now_ms - window_ms, now_ms, step_s, false)
             .await
             .map_err(|e| e.to_string());
         let _ = tx.send(PyroscopeMsg::Timeline(result));
@@ -1223,14 +1261,39 @@ fn spawn_heatmap_fetch(
     tokio::spawn(async move {
         let window_s = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as f64;
         let window_ms = (window_s * 1000.0) as i64;
-        // One slot per character column; clamp to ≥15 s.
         let cols = chart_width.max(20) as f64;
         let step_s = (window_s / cols).max(15.0);
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client
-            .select_heatmap(&profile_type, &service, now_ms - window_ms, now_ms, step_s)
+            .select_heatmap(&profile_type, &service, now_ms - window_ms, now_ms, step_s, false)
             .await
             .map_err(|e| e.to_string());
         let _ = tx.send(PyroscopeMsg::Heatmap(result));
+    });
+}
+
+fn spawn_span_heatmap_fetch(
+    tx: &mpsc::UnboundedSender<PyroscopeMsg>,
+    grafana_url: String,
+    ds_id: u64,
+    token: String,
+    profile_type: String,
+    service: String,
+    time_range: String,
+    now_ms: i64,
+    chart_width: u16,
+) {
+    let tx2 = tx.clone();
+    tokio::spawn(async move {
+        let window_s = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as f64;
+        let window_ms = (window_s * 1000.0) as i64;
+        let cols = chart_width.max(20) as f64;
+        let step_s = (window_s / cols).max(15.0);
+        let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
+        let result = client
+            .select_heatmap(&profile_type, &service, now_ms - window_ms, now_ms, step_s, true)
+            .await
+            .map_err(|e| e.to_string());
+        let _ = tx2.send(PyroscopeMsg::SpanHeatmap(result));
     });
 }

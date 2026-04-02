@@ -194,27 +194,45 @@ pub fn handle_pyroscope_select_series(model: &mut Model) -> Command<Effect, Even
     model.pyroscope_heatmap_loading = false;
     model.pyroscope_heatmap_error = None;
     model.pyroscope_heatmap.clear();
+    model.pyroscope_span_heatmap_loading = false;
+    model.pyroscope_span_heatmap_error = None;
+    model.pyroscope_span_heatmap.clear();
     render()
 }
 
-pub fn handle_pyroscope_cycle_view(model: &mut Model) -> Command<Effect, Event> {
-    model.pyroscope_sub_screen = match model.pyroscope_sub_screen {
-        PyroscopeSubScreen::Flamegraph => {
-            // Trigger a timeline load only if we have no data and no error yet.
+pub fn handle_pyroscope_select_view(model: &mut Model, idx: usize) -> Command<Effect, Event> {
+    let target = match idx {
+        0 => PyroscopeSubScreen::Flamegraph,
+        1 => PyroscopeSubScreen::Timeline,
+        2 => PyroscopeSubScreen::ProfileHeatmap,
+        3 => PyroscopeSubScreen::SpanHeatmap,
+        _ => return render(),
+    };
+    // Heatmap tabs need both heatmap data and timeline exemplars.
+    match &target {
+        PyroscopeSubScreen::Timeline => {
             if model.pyroscope_timeline.is_empty() && model.pyroscope_timeline_error.is_none() {
                 model.pyroscope_timeline_loading = true;
             }
-            PyroscopeSubScreen::Timeline
         }
-        PyroscopeSubScreen::Timeline => {
+        PyroscopeSubScreen::ProfileHeatmap => {
             if model.pyroscope_heatmap.is_empty() && model.pyroscope_heatmap_error.is_none() {
                 model.pyroscope_heatmap_loading = true;
             }
-            PyroscopeSubScreen::Heatmap
+            if model.pyroscope_timeline.is_empty() && model.pyroscope_timeline_error.is_none() {
+                model.pyroscope_timeline_loading = true;
+            }
         }
-        PyroscopeSubScreen::Heatmap => PyroscopeSubScreen::Flamegraph,
-        _ => return render(),
-    };
+        PyroscopeSubScreen::SpanHeatmap => {
+            if model.pyroscope_span_heatmap.is_empty()
+                && model.pyroscope_span_heatmap_error.is_none()
+            {
+                model.pyroscope_span_heatmap_loading = true;
+            }
+        }
+        _ => {}
+    }
+    model.pyroscope_sub_screen = target;
     render()
 }
 
@@ -226,6 +244,7 @@ pub fn handle_pyroscope_timeline_loaded(
         Ok(points) => {
             model.pyroscope_timeline_loading = false;
             model.pyroscope_timeline = points;
+            model.pyroscope_exemplar_index = 0;
         }
         Err(err) => {
             model.pyroscope_timeline_loading = false;
@@ -243,10 +262,29 @@ pub fn handle_pyroscope_heatmap_loaded(
         Ok(slots) => {
             model.pyroscope_heatmap_loading = false;
             model.pyroscope_heatmap = slots;
+            model.pyroscope_exemplar_index = 0;
         }
         Err(err) => {
             model.pyroscope_heatmap_loading = false;
             model.pyroscope_heatmap_error = Some(err);
+        }
+    }
+    render()
+}
+
+pub fn handle_pyroscope_span_heatmap_loaded(
+    model: &mut Model,
+    result: Result<Vec<HeatmapSlot>, String>,
+) -> Command<Effect, Event> {
+    match result {
+        Ok(slots) => {
+            model.pyroscope_span_heatmap_loading = false;
+            model.pyroscope_span_heatmap = slots;
+            model.pyroscope_exemplar_index = 0;
+        }
+        Err(err) => {
+            model.pyroscope_span_heatmap_loading = false;
+            model.pyroscope_span_heatmap_error = Some(err);
         }
     }
     render()
@@ -315,6 +353,9 @@ pub fn handle_pyroscope_direct_load(
     model.pyroscope_heatmap_loading = false;
     model.pyroscope_heatmap_error = None;
     model.pyroscope_heatmap.clear();
+    model.pyroscope_span_heatmap_loading = false;
+    model.pyroscope_span_heatmap_error = None;
+    model.pyroscope_span_heatmap.clear();
 
     render()
 }
@@ -420,4 +461,35 @@ pub fn handle_flamegraph_viewport_chars(
 ) -> Command<Effect, Event> {
     model.flamegraph_nav.viewport_chars = chars;
     render()
+}
+
+pub fn handle_exemplar_select_next(model: &mut Model) -> Command<Effect, Event> {
+    let count = exemplar_count(model);
+    if count > 0 {
+        model.pyroscope_exemplar_index = (model.pyroscope_exemplar_index + 1) % count;
+    }
+    render()
+}
+
+pub fn handle_exemplar_select_prev(model: &mut Model) -> Command<Effect, Event> {
+    let count = exemplar_count(model);
+    if count > 0 {
+        model.pyroscope_exemplar_index = (model.pyroscope_exemplar_index + count - 1) % count;
+    }
+    render()
+}
+
+fn exemplar_count(model: &Model) -> usize {
+    match model.pyroscope_sub_screen {
+        PyroscopeSubScreen::Timeline => {
+            model.pyroscope_timeline.iter().flat_map(|s| s.exemplars.iter()).count()
+        }
+        PyroscopeSubScreen::ProfileHeatmap => {
+            model.pyroscope_heatmap.iter().flat_map(|s| s.exemplars.iter()).count()
+        }
+        PyroscopeSubScreen::SpanHeatmap => {
+            model.pyroscope_span_heatmap.iter().flat_map(|s| s.exemplars.iter()).count()
+        }
+        _ => 0,
+    }
 }

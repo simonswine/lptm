@@ -3,7 +3,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    widgets::{Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs},
     Frame,
 };
 use shared::{
@@ -11,12 +11,13 @@ use shared::{
     FlamegraphLevelView, FlamegraphView, PyroscopeSubScreenView, SandwichView, ViewModel,
 };
 
-pub fn render_pyroscope_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+pub fn render_pyroscope_mode(frame: &mut Frame, vm: &ViewModel, area: Rect, blink_on: bool) {
     match vm.pyroscope_sub_screen {
         PyroscopeSubScreenView::ServiceList => render_pyroscope_service_list(frame, vm, area),
         PyroscopeSubScreenView::Flamegraph => render_pyroscope_flamegraph_screen(frame, vm, area),
-        PyroscopeSubScreenView::Timeline => render_pyroscope_timeline_screen(frame, vm, area),
-        PyroscopeSubScreenView::Heatmap => render_pyroscope_heatmap_screen(frame, vm, area),
+        PyroscopeSubScreenView::Timeline => render_pyroscope_timeline_screen(frame, vm, area, blink_on),
+        PyroscopeSubScreenView::ProfileHeatmap => render_pyroscope_heatmap_screen(frame, vm, area, false, blink_on),
+        PyroscopeSubScreenView::SpanHeatmap => render_pyroscope_heatmap_screen(frame, vm, area, true, blink_on),
     }
 }
 
@@ -173,11 +174,33 @@ fn render_profile_type_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     frame.render_stateful_widget(list, popup_area, &mut list_state);
 }
 
+fn render_view_tabs(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+    let selected = match vm.pyroscope_sub_screen {
+        PyroscopeSubScreenView::Flamegraph => 0,
+        PyroscopeSubScreenView::Timeline => 1,
+        PyroscopeSubScreenView::ProfileHeatmap => 2,
+        PyroscopeSubScreenView::SpanHeatmap => 3,
+        _ => 0,
+    };
+    let tabs = Tabs::new(vec!["Flamegraph", "Timeline", "Profile Heatmap", "Span Heatmap"])
+        .select(selected)
+        .block(Block::default().borders(Borders::ALL))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(tabs, area);
+}
+
 fn render_pyroscope_flamegraph_screen(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let [info_area, fg_area] =
-        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+    let [info_area, tabs_area, fg_area] =
+        Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)]).areas(area);
 
     render_profile_header(frame, vm, info_area);
+    render_view_tabs(frame, vm, tabs_area);
 
     if let Some(ref sw) = vm.sandwich_view {
         let title = format!(" Sandwich: {}  [s/Esc: exit] ", sw.target_name);
@@ -363,12 +386,6 @@ fn render_sandwich_view(frame: &mut Frame, sw: &SandwichView, block: Block, area
 }
 
 fn render_profile_header(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let view_label = match vm.pyroscope_sub_screen {
-        PyroscopeSubScreenView::Flamegraph => "Flamegraph",
-        PyroscopeSubScreenView::Timeline => "Timeline",
-        PyroscopeSubScreenView::Heatmap => "Heatmap",
-        _ => "",
-    };
     let block = Block::default().borders(Borders::ALL).title(" Profile ");
     let content = Line::from(vec![
         Span::styled(
@@ -382,16 +399,15 @@ fn render_profile_header(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         ),
         Span::raw("  ·  Last "),
         Span::styled(vm.pyroscope_time_range.clone(), Style::default().fg(Color::Yellow)),
-        Span::raw("  ·  "),
-        Span::styled(view_label, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
     ]);
     frame.render_widget(Paragraph::new(content).block(block), area);
 }
 
-fn render_pyroscope_timeline_screen(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let [info_area, chart_area] =
-        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+fn render_pyroscope_timeline_screen(frame: &mut Frame, vm: &ViewModel, area: Rect, blink_on: bool) {
+    let [info_area, tabs_area, chart_area] =
+        Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)]).areas(area);
     render_profile_header(frame, vm, info_area);
+    render_view_tabs(frame, vm, tabs_area);
 
     let block = Block::default().borders(Borders::ALL).title(" Timeline ");
     if vm.pyroscope_timeline_loading {
@@ -411,8 +427,10 @@ fn render_pyroscope_timeline_screen(frame: &mut Frame, vm: &ViewModel, area: Rec
         let unit = ProfileUnit::from_profile_type_id(&vm.pyroscope_selected_profile_type);
         let [vis_area, table_area] =
             Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(chart_area);
-        render_timeline(frame, tl, block, vis_area, unit);
-        render_timeline_exemplars(frame, tl, table_area, unit);
+        let sel_exemplar = tl.exemplars.get(vm.pyroscope_exemplar_index);
+        let highlight = sel_exemplar.map(|e| (e.timestamp_ms as f64, e.value as f64));
+        render_timeline(frame, tl, block, vis_area, unit, highlight, blink_on);
+        render_timeline_exemplars(frame, tl, table_area, unit, vm.pyroscope_exemplar_index);
     } else {
         frame.render_widget(
             Paragraph::new("No timeline data.")
@@ -423,9 +441,20 @@ fn render_pyroscope_timeline_screen(frame: &mut Frame, vm: &ViewModel, area: Rec
     }
 }
 
-fn render_timeline(frame: &mut Frame, tl: &TimelineView, block: Block, area: Rect, unit: ProfileUnit) {
+fn render_timeline(
+    frame: &mut Frame,
+    tl: &TimelineView,
+    block: Block,
+    area: Rect,
+    unit: ProfileUnit,
+    highlight: Option<(f64, f64)>,
+    blink_on: bool,
+) {
     let v_max = tl.value_max.max(1.0);
     let v_min = 0.0_f64.min(tl.value_min);
+
+    let y_labels = [unit.format(v_min), unit.format(v_max / 2.0), unit.format(v_max)];
+    let mid_ms = (tl.start_ms + tl.end_ms) / 2;
 
     let dataset = Dataset::default()
         .marker(symbols::Marker::Braille)
@@ -433,7 +462,6 @@ fn render_timeline(frame: &mut Frame, tl: &TimelineView, block: Block, area: Rec
         .style(Style::default().fg(Color::Green))
         .data(&tl.data);
 
-    let mid_ms = (tl.start_ms + tl.end_ms) / 2;
     let x_axis = Axis::default()
         .style(Style::default().fg(Color::DarkGray))
         .bounds([tl.start_ms as f64, tl.end_ms as f64])
@@ -447,17 +475,42 @@ fn render_timeline(frame: &mut Frame, tl: &TimelineView, block: Block, area: Rec
         .style(Style::default().fg(Color::DarkGray))
         .bounds([v_min, v_max])
         .labels([
-            Span::styled(unit.format(v_min), Style::default().fg(Color::DarkGray)),
-            Span::styled(unit.format(v_max / 2.0), Style::default().fg(Color::DarkGray)),
-            Span::styled(unit.format(v_max), Style::default().fg(Color::DarkGray)),
+            Span::styled(y_labels[0].clone(), Style::default().fg(Color::DarkGray)),
+            Span::styled(y_labels[1].clone(), Style::default().fg(Color::DarkGray)),
+            Span::styled(y_labels[2].clone(), Style::default().fg(Color::DarkGray)),
         ]);
 
-    let chart = Chart::new(vec![dataset])
-        .block(block)
-        .x_axis(x_axis)
-        .y_axis(y_axis);
-
+    let chart_area = block.inner(area);
+    let chart = Chart::new(vec![dataset]).block(block).x_axis(x_axis).y_axis(y_axis);
     frame.render_widget(chart, area);
+
+    // Overlay selected exemplar as a blinking 4-dot braille marker.
+    if let Some((ts, value)) = highlight {
+        // Replicate ratatui Chart::layout() to find the graph_area within chart_area.
+        // Y-axis label width (capped at 1/3 of chart width), plus 1 for the axis tick char.
+        let y_label_w = y_labels.iter().map(|s| s.len()).max().unwrap_or(0) as u16;
+        let y_label_w = y_label_w.min(chart_area.width / 3);
+        let graph_x = chart_area.x + y_label_w + 1; // +1 for y-axis tick
+        let graph_y = chart_area.y;
+        // X-axis occupies 2 rows at the bottom (1 tick + 1 label row).
+        let graph_w = chart_area.right().saturating_sub(graph_x);
+        let graph_h = chart_area.height.saturating_sub(2);
+
+        if graph_w > 0 && graph_h > 0 {
+            let time_span = (tl.end_ms - tl.start_ms).max(1) as f64;
+            let val_span = (v_max - v_min).max(f64::EPSILON);
+            let col = ((ts - tl.start_ms as f64) / time_span * graph_w as f64) as u16;
+            let row = ((v_max - value) / val_span * graph_h as f64) as u16;
+            let col = col.min(graph_w - 1);
+            let row = row.min(graph_h - 1);
+            if blink_on {
+                frame.render_widget(
+                    Paragraph::new(" ").style(Style::default().bg(Color::Magenta)),
+                    Rect::new(graph_x + col, graph_y + row, 1, 1),
+                );
+            }
+        }
+    }
 }
 
 fn format_time_label(ms: i64) -> String {
@@ -468,17 +521,34 @@ fn format_time_label(ms: i64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let [info_area, chart_area] =
-        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect, span: bool, blink_on: bool) {
+    let [info_area, tabs_area, chart_area] =
+        Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)]).areas(area);
     render_profile_header(frame, vm, info_area);
+    render_view_tabs(frame, vm, tabs_area);
 
-    let block = Block::default().borders(Borders::ALL).title(" Heatmap ");
-    if vm.pyroscope_heatmap_loading {
-        frame.render_widget(Paragraph::new("Loading heatmap…").block(block), chart_area);
+    let (loading, error, heatmap_data, title) = if span {
+        (
+            vm.pyroscope_span_heatmap_loading,
+            vm.pyroscope_span_heatmap_error.as_deref(),
+            vm.span_heatmap.as_ref(),
+            " Span Heatmap ",
+        )
+    } else {
+        (
+            vm.pyroscope_heatmap_loading,
+            vm.pyroscope_heatmap_error.as_deref(),
+            vm.heatmap.as_ref(),
+            " Profile Heatmap ",
+        )
+    };
+
+    let block = Block::default().borders(Borders::ALL).title(title);
+    if loading {
+        frame.render_widget(Paragraph::new("Loading…").block(block), chart_area);
         return;
     }
-    if let Some(ref err) = vm.pyroscope_heatmap_error {
+    if let Some(err) = error {
         frame.render_widget(
             Paragraph::new(format!("Error: {err}"))
                 .style(Style::default().fg(Color::Red))
@@ -487,12 +557,15 @@ fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect
         );
         return;
     }
-    if let Some(ref hm) = vm.heatmap {
+    if let Some(hm) = heatmap_data {
         let unit = ProfileUnit::from_profile_type_id(&vm.pyroscope_selected_profile_type);
+        let exemplars: Vec<_> = hm.exemplars.iter().collect();
         let [vis_area, table_area] =
             Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(chart_area);
-        render_heatmap(frame, hm, block, vis_area, unit);
-        render_heatmap_exemplars(frame, hm, table_area, unit);
+        let sel_exemplar = hm.exemplars.get(vm.pyroscope_exemplar_index);
+        let hm_highlight = sel_exemplar.map(|e| (e.timestamp_ms, e.value as f64));
+        render_heatmap(frame, hm, block, vis_area, unit, hm_highlight, blink_on);
+        render_exemplars(frame, &exemplars, &hm.varying_label_keys, table_area, unit, vm.pyroscope_exemplar_index);
     } else {
         frame.render_widget(
             Paragraph::new("No heatmap data.")
@@ -503,7 +576,15 @@ fn render_pyroscope_heatmap_screen(frame: &mut Frame, vm: &ViewModel, area: Rect
     }
 }
 
-fn render_heatmap(frame: &mut Frame, hm: &HeatmapView, block: Block, area: Rect, unit: ProfileUnit) {
+fn render_heatmap(
+    frame: &mut Frame,
+    hm: &HeatmapView,
+    block: Block,
+    area: Rect,
+    unit: ProfileUnit,
+    highlight: Option<(i64, f64)>,
+    blink_on: bool,
+) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -516,7 +597,6 @@ fn render_heatmap(frame: &mut Frame, hm: &HeatmapView, block: Block, area: Rect,
     let n_cols = hm.columns.len();
 
     for row in 0..usable_h {
-        // Map terminal row → bucket index (row 0 = highest bucket).
         let bucket_idx = row * hm.n_buckets / usable_h;
         let row_area = Rect::new(inner.x, inner.y + row as u16, inner.width, 1);
 
@@ -534,6 +614,23 @@ fn render_heatmap(frame: &mut Frame, hm: &HeatmapView, block: Block, area: Rect,
         frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
     }
 
+    // Overlay blinking marker at the selected exemplar's position.
+    if let Some((ts_ms, value)) = highlight {
+        let time_span = (hm.end_ms - hm.start_ms).max(1) as f64;
+        let col = ((ts_ms - hm.start_ms) as f64 / time_span * w as f64) as u16;
+        let y_span = (hm.y_max - hm.y_min).max(f64::EPSILON);
+        let bucket_frac = (value - hm.y_min) / y_span;
+        let row = ((1.0 - bucket_frac.clamp(0.0, 1.0)) * usable_h as f64) as u16;
+        let col = col.min(w as u16 - 1);
+        let row = row.min(usable_h as u16 - 1);
+        if blink_on {
+            frame.render_widget(
+                Paragraph::new(" ").style(Style::default().bg(Color::Magenta)),
+                Rect::new(inner.x + col, inner.y + row, 1, 1),
+            );
+        }
+    }
+
     let status = format!(" y: {} – {}", unit.format(hm.y_min), unit.format(hm.y_max));
     let status_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
     frame.render_widget(
@@ -542,38 +639,44 @@ fn render_heatmap(frame: &mut Frame, hm: &HeatmapView, block: Block, area: Rect,
     );
 }
 
-fn render_timeline_exemplars(frame: &mut Frame, tl: &TimelineView, area: Rect, unit: ProfileUnit) {
+fn render_timeline_exemplars(
+    frame: &mut Frame,
+    tl: &TimelineView,
+    area: Rect,
+    unit: ProfileUnit,
+    selected_idx: usize,
+) {
+    let exemplars: Vec<_> = tl.exemplars.iter().collect();
+    render_exemplars(frame, &exemplars, &tl.varying_label_keys, area, unit, selected_idx);
+}
+
+fn render_exemplars(
+    frame: &mut Frame,
+    exemplars: &[&shared::pyroscope::types::TimelineExemplar],
+    varying_label_keys: &[String],
+    area: Rect,
+    unit: ProfileUnit,
+    selected_idx: usize,
+) {
     let block = Block::default().borders(Borders::ALL).title(" Exemplars ");
 
-    let varying = &tl.varying_label_keys;
+    if exemplars.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No exemplars.").style(Style::default().fg(Color::DarkGray)).block(block),
+            area,
+        );
+        return;
+    }
 
-    let rows_data: Vec<(i64, i64, Vec<String>)> = tl
-        .exemplars
-        .iter()
-        .map(|e| {
-            let label_vals = varying
-                .iter()
-                .map(|k| {
-                    e.labels
-                        .iter()
-                        .find(|(lk, _)| lk == k)
-                        .map(|(_, lv)| lv.clone())
-                        .unwrap_or_default()
-                })
-                .collect();
-            (e.timestamp_ms, e.value, label_vals)
-        })
-        .collect();
-
-    let has_profile_id = tl.exemplars.iter().any(|e| !e.profile_id.is_empty());
-    let has_span_id = tl.exemplars.iter().any(|e| !e.span_id.is_empty());
+    let has_profile_id = exemplars.iter().any(|e| !e.profile_id.is_empty());
+    let has_span_id = exemplars.iter().any(|e| !e.span_id.is_empty());
 
     let bold_cyan = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     let mut header_cells = vec![
         Cell::from("Time").style(bold_cyan),
         Cell::from("Value").style(bold_cyan),
     ];
-    for k in varying {
+    for k in varying_label_keys {
         header_cells.push(Cell::from(k.clone()).style(bold_cyan));
     }
     if has_profile_id {
@@ -583,16 +686,16 @@ fn render_timeline_exemplars(frame: &mut Frame, tl: &TimelineView, area: Rect, u
         header_cells.push(Cell::from("Span ID").style(bold_cyan));
     }
 
-    let rows: Vec<Row> = rows_data
+    let rows: Vec<Row> = exemplars
         .iter()
-        .zip(tl.exemplars.iter())
-        .map(|((ts, v, labels), e)| {
+        .map(|e| {
             let mut cells = vec![
-                Cell::from(format_time_label(*ts)),
-                Cell::from(unit.format(*v as f64)),
+                Cell::from(format_time_label(e.timestamp_ms)),
+                Cell::from(unit.format(e.value as f64)),
             ];
-            for lv in labels {
-                cells.push(Cell::from(lv.clone()));
+            for k in varying_label_keys {
+                let lv = e.labels.iter().find(|(lk, _)| lk == k).map(|(_, lv)| lv.clone()).unwrap_or_default();
+                cells.push(Cell::from(lv));
             }
             if has_profile_id {
                 cells.push(Cell::from(e.profile_id.clone()).style(Style::default().fg(Color::DarkGray)));
@@ -605,7 +708,7 @@ fn render_timeline_exemplars(frame: &mut Frame, tl: &TimelineView, area: Rect, u
         .collect();
 
     let mut constraints = vec![Constraint::Fill(1), Constraint::Length(10)];
-    for _ in varying {
+    for _ in varying_label_keys {
         constraints.push(Constraint::Fill(1));
     }
     if has_profile_id {
@@ -615,66 +718,15 @@ fn render_timeline_exemplars(frame: &mut Frame, tl: &TimelineView, area: Rect, u
         constraints.push(Constraint::Length(18));
     }
 
-    let table = Table::new(rows, constraints).header(Row::new(header_cells)).block(block);
-    frame.render_widget(table, area);
-}
-
-fn render_heatmap_exemplars(frame: &mut Frame, hm: &HeatmapView, area: Rect, unit: ProfileUnit) {
-    let block = Block::default().borders(Borders::ALL).title(" Top Values ");
-
-    let n_cols = hm.columns.len();
-    if n_cols == 0 || hm.n_buckets == 0 {
-        frame.render_widget(Paragraph::new("No data.").block(block), area);
-        return;
-    }
-
-    let time_span = hm.end_ms - hm.start_ms;
-    let y_span = hm.y_max - hm.y_min;
-
-    // One entry per column: find the bucket with the highest intensity.
-    let mut entries: Vec<(f64, String, String)> = hm
-        .columns
-        .iter()
-        .enumerate()
-        .filter_map(|(c, col)| {
-            let (b, &intensity) = col
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))?;
-            if intensity <= 0.0 {
-                return None;
-            }
-            let ts_ms = hm.start_ms + c as i64 * time_span / n_cols as i64;
-            let y_val = hm.y_min + b as f64 * y_span / hm.n_buckets as f64;
-            Some((intensity, format_time_label(ts_ms), unit.format(y_val)))
-        })
-        .collect();
-
-    entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let header = Row::new([
-        Cell::from("Time").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Cell::from("Value").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Cell::from("Intensity").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-    ]);
-    let rows: Vec<Row> = entries
-        .iter()
-        .map(|(intensity, time, y)| {
-            Row::new([
-                Cell::from(time.clone()),
-                Cell::from(y.clone()),
-                Cell::from(format!("{:.2}", intensity)),
-            ])
-        })
-        .collect();
-
-    let table = Table::new(
-        rows,
-        [Constraint::Fill(1), Constraint::Length(10), Constraint::Length(10)],
-    )
-    .header(header)
-    .block(block);
-    frame.render_widget(table, area);
+    let clamped = selected_idx.min(exemplars.len().saturating_sub(1));
+    let table = Table::new(rows, constraints)
+        .header(Row::new(header_cells))
+        .block(block)
+        .highlight_symbol(">> ")
+        .row_highlight_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD));
+    let mut table_state = TableState::default();
+    table_state.select(Some(clamped));
+    frame.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn heatmap_color(v: f64) -> Color {

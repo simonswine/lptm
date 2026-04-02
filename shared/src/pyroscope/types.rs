@@ -619,6 +619,9 @@ pub struct HeatmapSlot {
     pub y_min: Vec<f64>,
     /// Sample count per bucket.
     pub counts: Vec<i32>,
+    /// Exemplars attached to this slot (populated when exemplar_type is set).
+    #[serde(default)]
+    pub exemplars: Vec<TimelineExemplar>,
 }
 
 /// View model for the timeline chart.
@@ -649,6 +652,12 @@ pub struct HeatmapView {
     pub y_max: f64,
     pub start_ms: i64,
     pub end_ms: i64,
+    /// Exemplars from timeline series (populated in app::view when timeline data is available).
+    #[serde(default)]
+    pub exemplars: Vec<TimelineExemplar>,
+    /// Label keys that vary across exemplars.
+    #[serde(default)]
+    pub varying_label_keys: Vec<String>,
 }
 
 pub fn build_timeline_view(series_list: &[TimelineSeries]) -> Option<TimelineView> {
@@ -694,7 +703,7 @@ pub fn build_timeline_view(series_list: &[TimelineSeries]) -> Option<TimelineVie
     })
 }
 
-fn compute_varying_label_keys_exemplars(exemplars: &[TimelineExemplar]) -> Vec<String> {
+pub fn compute_varying_label_keys_exemplars(exemplars: &[TimelineExemplar]) -> Vec<String> {
     if exemplars.len() <= 1 {
         return exemplars
             .first()
@@ -762,6 +771,13 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
         })
         .collect();
 
+    let mut exemplars: Vec<TimelineExemplar> = slots
+        .iter()
+        .flat_map(|s| s.exemplars.iter().cloned())
+        .collect();
+    exemplars.sort_by(|a, b| b.value.cmp(&a.value));
+    let varying_label_keys = compute_varying_label_keys_exemplars(&exemplars);
+
     Some(HeatmapView {
         columns,
         n_buckets,
@@ -769,6 +785,8 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
         y_max,
         start_ms: slots.first().map(|s| s.timestamp_ms).unwrap_or(0),
         end_ms: slots.last().map(|s| s.timestamp_ms).unwrap_or(0),
+        exemplars,
+        varying_label_keys,
     })
 }
 
