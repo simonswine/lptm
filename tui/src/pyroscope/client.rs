@@ -185,12 +185,14 @@ impl PyroscopeClient {
         };
         let resp: SelectHeatmapResponse = self.post("SelectHeatmap", &req).await?;
 
+        let step_ms = (step_s * 1000.0).floor() as i64;
         let slots: Vec<HeatmapSlot> = resp
             .series
             .into_iter()
             .flat_map(|s| s.slots.into_iter())
             .map(|slot| HeatmapSlot {
                 timestamp_ms: slot.timestamp,
+                step_ms,
                 y_min: slot.y_min,
                 counts: slot.counts,
                 exemplars: slot

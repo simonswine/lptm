@@ -615,7 +615,12 @@ pub struct TimelineSeries {
 /// One time slot in a heatmap (raw API data).
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HeatmapSlot {
+    /// Timestamp of the right edge (x_max) of this slot. slot covers [timestamp_ms - step_ms, timestamp_ms).
     pub timestamp_ms: i64,
+    /// Step duration in milliseconds from the query. Must not be derived from consecutive timestamps
+    /// because empty slots may be omitted from the response.
+    #[serde(default)]
+    pub step_ms: i64,
     /// Lower y bound of each bucket.
     pub y_min: Vec<f64>,
     /// Sample count per bucket.
@@ -754,6 +759,34 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
     if slots.is_empty() {
         return None;
     }
+
+    // step_ms comes from the query (stored on each slot), not derived from timestamps
+    // because empty slots may be omitted from the API response.
+    let step_ms = slots.iter().map(|s| s.step_ms).find(|&s| s > 0).unwrap_or(0);
+
+    // Multiple HeatmapSeries may contribute slots at the same timestamp.
+    // Sort by timestamp then merge same-timestamp slots by summing counts
+    // and pooling exemplars.
+    let slots: Vec<HeatmapSlot> = {
+        let mut sorted = slots.to_vec();
+        sorted.sort_by_key(|s| s.timestamp_ms);
+        let mut merged: Vec<HeatmapSlot> = Vec::with_capacity(sorted.len());
+        for slot in sorted {
+            if let Some(last) = merged.last_mut() {
+                if last.timestamp_ms == slot.timestamp_ms {
+                    for (a, b) in last.counts.iter_mut().zip(slot.counts.iter()) {
+                        *a = a.saturating_add(*b);
+                    }
+                    last.exemplars.extend(slot.exemplars);
+                    continue;
+                }
+            }
+            merged.push(slot);
+        }
+        merged
+    };
+    let slots = slots.as_slice();
+
     let global_max = slots
         .iter()
         .flat_map(|s| s.counts.iter())
@@ -775,13 +808,6 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
         y_max_lower - y_min
     };
     let y_max = y_max_lower + bucket_step;
-
-    // Time step between slots (ms).
-    let step_ms = if slots.len() >= 2 {
-        slots[1].timestamp_ms - slots[0].timestamp_ms
-    } else {
-        0
-    };
 
     // Columns: each slot → one column; row 0 = highest bucket.
     // count=0  → intensity 0.0  (transparent/black, no activity).

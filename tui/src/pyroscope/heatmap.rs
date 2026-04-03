@@ -408,6 +408,7 @@ mod tests {
         let slots: Vec<HeatmapSlot> = (0..n_slots)
             .map(|i| HeatmapSlot {
                 timestamp_ms: start_ms + (i as i64 + 1) * step_ms,
+                step_ms,
                 y_min: (0..n_buckets).map(|b| b as f64 * 10.0).collect(),
                 counts: vec![1i32; n_buckets],
                 exemplars: vec![],
@@ -501,7 +502,8 @@ mod tests {
         // y_min stores lower bounds. With step 10.0 per bucket and 5 buckets:
         // lower bounds: 0, 10, 20, 30, 40  → last lower = 40, step = 10 → y_max = 50
         let slot = HeatmapSlot {
-            timestamp_ms: 0,
+            timestamp_ms: 10_000,
+            step_ms: 10_000,
             y_min: vec![0.0, 10.0, 20.0, 30.0, 40.0],
             counts: vec![1; 5],
             exemplars: vec![],
@@ -517,15 +519,33 @@ mod tests {
         //   slot 0: timestamp=5000 → x_min=0,    x_max=5000
         //   slot 1: timestamp=10000 → x_min=5000, x_max=10000
         // So hm.start_ms = 0, hm.end_ms = 10000.
+        // step_ms comes from the slot field, not derived from timestamps.
         let step = 5_000i64;
         let slots = vec![
-            HeatmapSlot { timestamp_ms: step,      y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
-            HeatmapSlot { timestamp_ms: 2 * step,  y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
+            HeatmapSlot { timestamp_ms: step,     step_ms: step, y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
+            HeatmapSlot { timestamp_ms: 2 * step, step_ms: step, y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
         ];
         let hm = build_heatmap_view(&slots).unwrap();
         assert_eq!(hm.start_ms, 0,         "start_ms = first_slot.timestamp_ms - step_ms");
         assert_eq!(hm.end_ms,   2 * step,  "end_ms = last_slot.timestamp_ms (its x_max)");
         assert_eq!(hm.step_ms,  step);
+    }
+
+    #[test]
+    fn heatmap_view_missing_slots_use_query_step() {
+        // If slots are sparse (empty slots omitted), step_ms from the query
+        // must be used — deriving from consecutive timestamps would give wrong results.
+        let step = 5_000i64;
+        let slots = vec![
+            // slot at t=5000 (x_min=0)
+            HeatmapSlot { timestamp_ms: step,      step_ms: step, y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
+            // slot at t=20000 (x_min=15000) — gap of 3 steps, slots 2 and 3 are missing
+            HeatmapSlot { timestamp_ms: 4 * step,  step_ms: step, y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
+        ];
+        let hm = build_heatmap_view(&slots).unwrap();
+        assert_eq!(hm.step_ms, step, "step_ms must come from query, not consecutive timestamp diff");
+        assert_eq!(hm.start_ms, 0,        "start_ms = first_slot.x_min");
+        assert_eq!(hm.end_ms,   4 * step, "end_ms = last_slot.x_max");
     }
 
     #[test]
@@ -657,25 +677,25 @@ mod tests {
         };
         let slots = vec![
             HeatmapSlot {
-                timestamp_ms: 1000, // x_min=0, x_max=1000
+                timestamp_ms: 1000, step_ms: 1000, // x_min=0, x_max=1000
                 y_min: vec![0.0, 100.0, 200.0],
                 counts: vec![1, 1, 1],
                 exemplars: vec![],
             },
             HeatmapSlot {
-                timestamp_ms: 2000, // x_min=1000, x_max=2000
+                timestamp_ms: 2000, step_ms: 1000, // x_min=1000, x_max=2000
                 y_min: vec![0.0, 100.0, 200.0],
                 counts: vec![1, 10, 1],  // bucket 1 is hot
                 exemplars: vec![exemplar],
             },
             HeatmapSlot {
-                timestamp_ms: 3000, // x_min=2000, x_max=3000
+                timestamp_ms: 3000, step_ms: 1000, // x_min=2000, x_max=3000
                 y_min: vec![0.0, 100.0, 200.0],
                 counts: vec![1, 1, 1],
                 exemplars: vec![],
             },
             HeatmapSlot {
-                timestamp_ms: 4000, // x_min=3000, x_max=4000
+                timestamp_ms: 4000, step_ms: 1000, // x_min=3000, x_max=4000
                 y_min: vec![0.0, 100.0, 200.0],
                 counts: vec![1, 1, 1],
                 exemplars: vec![],
@@ -885,19 +905,19 @@ mod tests {
         //   3. count=1 vs count=1_000_000 are visually distinct.
         let slots = vec![
             HeatmapSlot {
-                timestamp_ms: 0,
+                timestamp_ms: 1000, step_ms: 1000,
                 y_min: vec![0.0, 100.0],
                 counts: vec![0, 0],
                 exemplars: vec![],
             },
             HeatmapSlot {
-                timestamp_ms: 1000,
+                timestamp_ms: 2000, step_ms: 1000,
                 y_min: vec![0.0, 100.0],
                 counts: vec![1, 1],
                 exemplars: vec![],
             },
             HeatmapSlot {
-                timestamp_ms: 2000,
+                timestamp_ms: 3000, step_ms: 1000,
                 y_min: vec![0.0, 100.0],
                 counts: vec![1_000_000, 1_000_000],
                 exemplars: vec![],
