@@ -1,3 +1,4 @@
+use log::debug;
 use serde::{Deserialize, Serialize};
 
 
@@ -813,8 +814,30 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
     exemplars.sort_by(|a, b| b.value.cmp(&a.value));
     let varying_label_keys = compute_varying_label_keys_exemplars(&exemplars);
 
-    let start_ms = slots.first().map(|s| s.timestamp_ms).unwrap_or(0);
-    let end_ms = slots.last().map(|s| s.timestamp_ms).unwrap_or(0) + step_ms;
+    // slot.timestamp_ms is the x_max (right edge) of the slot interval.
+    // x_min = timestamp_ms - step_ms, x_max = timestamp_ms.
+    let start_ms = slots.first().map(|s| s.timestamp_ms).unwrap_or(0) - step_ms;
+    let end_ms = slots.last().map(|s| s.timestamp_ms).unwrap_or(0);
+
+    debug!(
+        "build_heatmap_view: n_slots={} step_ms={} start_ms={} end_ms={}",
+        slots.len(), step_ms, start_ms, end_ms,
+    );
+    for (i, slot) in slots.iter().enumerate() {
+        if !slot.exemplars.is_empty() {
+            debug!(
+                "  slot[{}] timestamp_ms={} (x_min={} x_max={}) exemplars:",
+                i, slot.timestamp_ms, slot.timestamp_ms - step_ms, slot.timestamp_ms,
+            );
+            for e in &slot.exemplars {
+                let offset_ms = e.timestamp_ms - (slot.timestamp_ms - step_ms);
+                debug!(
+                    "    exemplar ts={} offset_from_x_min={}ms value={}",
+                    e.timestamp_ms, offset_ms, e.value,
+                );
+            }
+        }
+    }
 
     Some(HeatmapView {
         columns,

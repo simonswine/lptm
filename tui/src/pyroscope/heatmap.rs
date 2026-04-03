@@ -66,8 +66,8 @@ impl HeatmapPopup {
         Some(HeatmapPopup {
             screen_x,
             screen_y,
-            slot_start_ms: slot.timestamp_ms,
-            slot_end_ms: slot.timestamp_ms + hm.step_ms,
+            slot_start_ms: slot.timestamp_ms - hm.step_ms,
+            slot_end_ms: slot.timestamp_ms,
             bucket_y_min,
             bucket_y_max: bucket_y_min + bucket_step,
             count,
@@ -364,10 +364,11 @@ mod tests {
 
     /// Build a minimal HeatmapView from explicit slot data.
     fn make_heatmap(n_slots: usize, n_buckets: usize, step_ms: i64) -> HeatmapView {
+        // slot.timestamp_ms is x_max; first slot x_max = start_ms + step_ms.
         let start_ms = 1_000_000i64;
         let slots: Vec<HeatmapSlot> = (0..n_slots)
             .map(|i| HeatmapSlot {
-                timestamp_ms: start_ms + i as i64 * step_ms,
+                timestamp_ms: start_ms + (i as i64 + 1) * step_ms,
                 y_min: (0..n_buckets).map(|b| b as f64 * 10.0).collect(),
                 counts: vec![1i32; n_buckets],
                 exemplars: vec![],
@@ -472,17 +473,20 @@ mod tests {
     }
 
     #[test]
-    fn heatmap_view_end_ms_includes_last_slot_duration() {
-        // Two slots 5000ms apart: end_ms should be last_ts + step = start + 2*step.
+    fn heatmap_view_start_and_end_ms() {
+        // slot.timestamp_ms is x_max. Two slots:
+        //   slot 0: timestamp=5000 → x_min=0,    x_max=5000
+        //   slot 1: timestamp=10000 → x_min=5000, x_max=10000
+        // So hm.start_ms = 0, hm.end_ms = 10000.
         let step = 5_000i64;
         let slots = vec![
-            HeatmapSlot { timestamp_ms: 0, y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
-            HeatmapSlot { timestamp_ms: step, y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
+            HeatmapSlot { timestamp_ms: step,      y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
+            HeatmapSlot { timestamp_ms: 2 * step,  y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
         ];
         let hm = build_heatmap_view(&slots).unwrap();
-        assert_eq!(hm.start_ms, 0);
-        assert_eq!(hm.end_ms, 2 * step, "end_ms must be last_slot_ts + step_ms");
-        assert_eq!(hm.step_ms, step);
+        assert_eq!(hm.start_ms, 0,         "start_ms = first_slot.timestamp_ms - step_ms");
+        assert_eq!(hm.end_ms,   2 * step,  "end_ms = last_slot.timestamp_ms (its x_max)");
+        assert_eq!(hm.step_ms,  step);
     }
 
     #[test]
@@ -573,36 +577,37 @@ mod tests {
     /// in the middle slot/bucket. Returns both the HeatmapView and the raw slots.
     fn make_heatmap_with_exemplar() -> (HeatmapView, Vec<HeatmapSlot>) {
         //  Buckets (y_min lower bounds): 0, 100, 200  →  y_max = 300
-        //  Slots at t=0, 1000, 2000, 3000 ms
-        //  Slot 1 (t=1000) has a hot bucket 1 (count=10) and an exemplar at value=150
+        //  step_ms = 1000; slot.timestamp_ms = x_max of that slot.
+        //  Slot 1 (x_min=1000, x_max=2000) has hot bucket 1 (count=10)
+        //  and an exemplar at ts=1500 (midpoint of that slot).
         let exemplar = TimelineExemplar {
             labels: vec![("pod".into(), "pod-a".into())],
             profile_id: "prof-001".into(),
             span_id: String::new(),
             value: 150,
-            timestamp_ms: 1000,
+            timestamp_ms: 1500, // within [1000, 2000)
         };
         let slots = vec![
             HeatmapSlot {
-                timestamp_ms: 0,
+                timestamp_ms: 1000, // x_min=0, x_max=1000
                 y_min: vec![0.0, 100.0, 200.0],
                 counts: vec![1, 1, 1],
                 exemplars: vec![],
             },
             HeatmapSlot {
-                timestamp_ms: 1000,
+                timestamp_ms: 2000, // x_min=1000, x_max=2000
                 y_min: vec![0.0, 100.0, 200.0],
-                counts: vec![1, 10, 1],   // bucket 1 is hot
+                counts: vec![1, 10, 1],  // bucket 1 is hot
                 exemplars: vec![exemplar],
             },
             HeatmapSlot {
-                timestamp_ms: 2000,
+                timestamp_ms: 3000, // x_min=2000, x_max=3000
                 y_min: vec![0.0, 100.0, 200.0],
                 counts: vec![1, 1, 1],
                 exemplars: vec![],
             },
             HeatmapSlot {
-                timestamp_ms: 3000,
+                timestamp_ms: 4000, // x_min=3000, x_max=4000
                 y_min: vec![0.0, 100.0, 200.0],
                 counts: vec![1, 1, 1],
                 exemplars: vec![],
@@ -787,7 +792,7 @@ mod tests {
         let popup = HeatmapPopup::from_click(click_col, click_row, &layout, &hm, &slots)
             .expect("click inside graph should produce a popup");
 
-        // slot 1 timestamp = 1000ms.
+        // slot 1: timestamp_ms=2000 (x_max), so x_min = 2000 - step_ms(1000) = 1000.
         assert_eq!(popup.slot_start_ms, 1000, "popup slot_start_ms wrong");
         // bucket 1: y_min=100.0, y_max=200.0 (bucket_step=100).
         assert_eq!(popup.bucket_y_min, 100.0, "popup bucket_y_min wrong");

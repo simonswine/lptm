@@ -54,7 +54,8 @@ message Series {
 }
 
 message HeatmapSlot {
-  // Milliseconds unix timestamp
+  // Milliseconds unix timestamp of the right edge (x_max) of this time slot.
+  // The slot covers the half-open interval [timestamp - step, timestamp).
   int64 timestamp = 1;
   // Minimum y value
   repeated double y_min = 2;
