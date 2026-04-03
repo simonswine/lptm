@@ -377,10 +377,14 @@ mod tests {
     }
 
     fn make_layout(graph_w: u16, graph_h: u16) -> (HeatmapLayout, Rect) {
-        // Simulate inner area with a 0,0 origin.
-        let inner = Rect::new(0, 0, graph_w + 12, graph_h + 2);
-        let y_label_w = 10u16; // fixed for test simplicity
-        let layout = HeatmapLayout::from_inner(inner, y_label_w).unwrap();
+        // inner.width  = graph_w + y_label_w(10) + 1 (y-axis tick char)
+        // inner.height = graph_h + 2 (x-axis tick + label rows)
+        // This ensures from_inner() produces exactly the requested graph dimensions.
+        const Y_LABEL_W: u16 = 10;
+        let inner = Rect::new(0, 0, graph_w + Y_LABEL_W + 1, graph_h + 2);
+        let layout = HeatmapLayout::from_inner(inner, Y_LABEL_W).unwrap();
+        assert_eq!(layout.graph_w, graph_w, "make_layout: graph_w mismatch");
+        assert_eq!(layout.graph_h, graph_h, "make_layout: graph_h mismatch");
         (layout, inner)
     }
 
@@ -523,20 +527,43 @@ mod tests {
     #[test]
     fn slot_to_column_alignment() {
         // With n_cols == graph_w each slot should map to exactly its own column.
+        // slot.timestamp_ms is the x_min (left edge) of the slot; x_max = x_min + step_ms.
         let n_slots = 20usize;
         let step_ms = 1000i64;
         let hm = make_heatmap(n_slots, 10, step_ms);
         let graph_w = n_slots as u16;
         let (layout, _) = make_layout(graph_w, 20);
+        let val = hm.y_min + (hm.y_max - hm.y_min) / 2.0;
 
-        for (i, slot_col) in (0..n_slots).enumerate() {
-            let ts = hm.start_ms + i as i64 * step_ms;
-            let val = hm.y_min + (hm.y_max - hm.y_min) / 2.0;
-            let (col, _) = layout.exemplar_to_cell(ts, val, &hm);
-            assert_eq!(
-                col, slot_col as u16,
-                "slot {i} at ts {ts} should map to col {slot_col}, got {col}"
-            );
+        for i in 0..n_slots {
+            let slot_x_min = hm.start_ms + i as i64 * step_ms;
+            let slot_x_max = slot_x_min + step_ms;
+            let expected_col = i as u16;
+
+            // x_min (left edge) maps to this column.
+            let (col, _) = layout.exemplar_to_cell(slot_x_min, val, &hm);
+            assert_eq!(col, expected_col,
+                "slot {i}: x_min={slot_x_min} should map to col {expected_col}, got {col}");
+
+            // Midpoint also maps to this column.
+            let mid_ts = slot_x_min + step_ms / 2;
+            let (col, _) = layout.exemplar_to_cell(mid_ts, val, &hm);
+            assert_eq!(col, expected_col,
+                "slot {i}: mid_ts={mid_ts} should map to col {expected_col}, got {col}");
+
+            // x_max - 1ms (just before right edge) still maps to this column, not the next.
+            let just_before_x_max = slot_x_max - 1;
+            let (col, _) = layout.exemplar_to_cell(just_before_x_max, val, &hm);
+            assert_eq!(col, expected_col,
+                "slot {i}: just_before_x_max={just_before_x_max} should still map to col {expected_col}, got {col}");
+
+            // x_max itself (left edge of the next slot) should map to col+1
+            // (or be clamped to last col for the final slot).
+            if i + 1 < n_slots {
+                let (col, _) = layout.exemplar_to_cell(slot_x_max, val, &hm);
+                assert_eq!(col, expected_col + 1,
+                    "slot {i}: x_max={slot_x_max} (= x_min of next slot) should map to col {}, got {col}", expected_col + 1);
+            }
         }
     }
 
