@@ -163,25 +163,50 @@ impl HeatmapLayout {
         Some(HeatmapLayout { graph_x, graph_y, graph_w, graph_h })
     }
 
-    /// Map a data-space `(timestamp_ms, value)` exemplar to a terminal cell
-    /// `(col, row)` within the graph grid, clamped to valid bounds.
+    /// Map a timestamp to a pixel column using the **same** slot→pixel formula
+    /// as the renderer (`slot = col * n_cols / w`), so the marker always falls
+    /// inside the pixel range the renderer assigned to that slot.
     ///
-    /// `col` is relative to `graph_x`, `row` is relative to `graph_y`.
-    pub fn exemplar_to_cell(&self, ts_ms: i64, value: f64, hm: &HeatmapView) -> (u16, u16) {
-        let time_span = (hm.end_ms - hm.start_ms).max(1) as f64;
-        let y_span = (hm.y_max - hm.y_min).max(f64::EPSILON);
+    /// The renderer maps `col → slot` via `floor(col * n_cols / w)`.
+    /// The first pixel column for slot `s` is therefore `ceil(s * w / n_cols)`
+    /// (the smallest `c` where `floor(c * n_cols / w) == s`).
+    /// We interpolate the sub-slot position within that range.
+    pub fn ts_to_col(&self, ts_ms: i64, hm: &HeatmapView) -> u16 {
+        let n_cols = hm.columns.len().max(1);
         let w = self.graph_w as usize;
+        let step = hm.step_ms.max(1);
+
+        let s = ((ts_ms - hm.start_ms) / step)
+            .max(0)
+            .min(n_cols as i64 - 1) as usize;
+
+        // Sub-slot fraction: how far within [slot_xmin, slot_xmax) is ts?
+        let sub_frac = ((ts_ms - hm.start_ms - s as i64 * step) as f64 / step as f64)
+            .clamp(0.0, 1.0);
+
+        // Pixel range [c_first, c_next) assigned to slot s by the renderer.
+        // ceil(s * w / n_cols) = (s * w + n_cols - 1) / n_cols
+        let c_first = (s * w + n_cols - 1) / n_cols;
+        let c_next = ((s + 1) * w + n_cols - 1) / n_cols;
+        let slot_px = c_next.saturating_sub(c_first).max(1);
+
+        let col = c_first + (sub_frac * slot_px as f64) as usize;
+        col.min(w.saturating_sub(1)) as u16
+    }
+
+    /// Map a value to a pixel row using the same bucket→pixel formula as the
+    /// renderer (`bucket_idx = row * n_buckets / h`, columns stored reversed).
+    pub fn value_to_row(&self, value: f64, hm: &HeatmapView) -> u16 {
         let h = self.graph_h as usize;
+        let y_span = (hm.y_max - hm.y_min).max(f64::EPSILON);
+        let row = ((1.0 - (value - hm.y_min) / y_span).clamp(0.0, 1.0) * h as f64) as usize;
+        row.min(h.saturating_sub(1)) as u16
+    }
 
-        // Column: linear interpolation over [start_ms, end_ms).
-        let col = ((ts_ms - hm.start_ms) as f64 / time_span * w as f64) as u16;
-
-        // Row: row 0 = highest value (y_max), last row = lowest value (y_min).
-        let row = ((1.0 - (value - hm.y_min) / y_span).clamp(0.0, 1.0) * h as f64) as u16;
-
-        let col = col.min(self.graph_w.saturating_sub(1));
-        let row = row.min(self.graph_h.saturating_sub(1));
-        (col, row)
+    /// Map a data-space `(timestamp_ms, value)` exemplar to a terminal cell
+    /// `(col, row)` within the graph grid.
+    pub fn exemplar_to_cell(&self, ts_ms: i64, value: f64, hm: &HeatmapView) -> (u16, u16) {
+        (self.ts_to_col(ts_ms, hm), self.value_to_row(value, hm))
     }
 
     /// Map a terminal cell `(col, row)` (relative to `graph_x`/`graph_y`)
@@ -328,6 +353,8 @@ pub fn render_heatmap(
     }
 
     // ── Heatmap grid ──────────────────────────────────────────────────────────
+    // col → slot: slot_start = col * n_cols / w  (shared with ts_to_col inverse)
+    // row → bucket_idx: bucket_idx = row * n_buckets / h  (shared with value_to_row inverse)
     let w = graph_w as usize;
     let usable_h = graph_h as usize;
     for row in 0..usable_h {
@@ -348,8 +375,12 @@ pub fn render_heatmap(
     }
 
     // ── Blinking exemplar marker ──────────────────────────────────────────────
+    // Uses ts_to_col / value_to_row which are the exact inverse of the grid's
+    // col→slot and row→bucket_idx formulas, guaranteeing the marker lands in
+    // the correct cell.
     if let Some((ts_ms, value)) = highlight {
-        let (col, row) = layout.exemplar_to_cell(ts_ms, value, hm);
+        let col = layout.ts_to_col(ts_ms, hm);
+        let row = layout.value_to_row(value, hm);
         if blink_on {
             frame.render_widget(
                 Paragraph::new(" ").style(Style::default().bg(Color::Magenta)),
@@ -534,6 +565,35 @@ mod tests {
             "bottom row should map to lowest raw bucket (index 0), got {}",
             bucket
         );
+    }
+
+    #[test]
+    fn ts_to_col_matches_renderer_slot_mapping() {
+        // For every slot s, any timestamp within [x_min, x_max) must map to a
+        // pixel column that the renderer assigns to slot s via col*n_cols/w.
+        let n_slots = 20usize;
+        let step_ms = 1000i64;
+        let hm = make_heatmap(n_slots, 4, step_ms);
+        // Use a width that is NOT a multiple of n_slots to exercise the non-trivial case.
+        let (layout, _) = make_layout(47, 20); // 47 is prime, ensures fractional slots
+        let n_cols = hm.columns.len();
+        let w = layout.graph_w as usize;
+
+        for s in 0..n_slots {
+            let slot_xmin = hm.start_ms + s as i64 * step_ms;
+            // Check at x_min, quarter, midpoint, three-quarter, and just before x_max.
+            for offset_num in [0i64, 1, 2, 3, step_ms - 1] {
+                let ts = slot_xmin + offset_num * step_ms / (step_ms - 1).max(1);
+                let ts = ts.min(slot_xmin + step_ms - 1);
+                let col = layout.ts_to_col(ts, &hm) as usize;
+                let slot_back = col * n_cols / w;
+                assert_eq!(
+                    slot_back, s,
+                    "slot {s}: ts={ts} (offset {}ms) -> col={col} -> slot_back={slot_back} (expected {s})",
+                    ts - slot_xmin,
+                );
+            }
+        }
     }
 
     #[test]
