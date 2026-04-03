@@ -15,6 +15,7 @@ use crate::pyroscope::{
     build_flamegraph_view, build_sandwich_view, FlameGraph, FlamegraphNav, FlamegraphView,
     SandwichView,
 };
+use crate::tempo::TempoTrace;
 
 #[effect]
 pub enum Effect {
@@ -167,6 +168,16 @@ pub enum Event {
     HistorySelectPrev,
     /// Select a datasource by UID (preferred) with a name fallback for older history entries.
     SelectDatasource { uid: String, name: String },
+
+    // Tempo mode
+    EnterTempo,
+    TempoQueryInput(char),
+    TempoQueryBackspace,
+    TempoQueryCursorLeft,
+    TempoQueryCursorRight,
+    TempoExecuteQuery,
+    TempoResultLoaded(Result<Vec<TempoTrace>, String>),
+    BackFromTempo,
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -177,6 +188,7 @@ pub enum Screen {
     DatasourceList,
     QueryMode,
     PyroscopeMode,
+    TempoMode,
 }
 
 impl std::fmt::Debug for Screen {
@@ -185,6 +197,7 @@ impl std::fmt::Debug for Screen {
             Screen::DatasourceList => write!(f, "DatasourceList"),
             Screen::QueryMode => write!(f, "QueryMode"),
             Screen::PyroscopeMode => write!(f, "PyroscopeMode"),
+                Screen::TempoMode => write!(f, "TempoMode"),
         }
     }
 }
@@ -272,6 +285,13 @@ pub struct Model {
     pub pyroscope_span_heatmap: Vec<crate::pyroscope::HeatmapSlot>,
 
     pub pyroscope_exemplar_index: usize,
+
+    // Tempo state
+    pub tempo_query: String,
+    pub tempo_cursor_pos: usize,
+    pub tempo_loading: bool,
+    pub tempo_error: Option<String>,
+    pub tempo_results: Vec<TempoTrace>,
 }
 
 // ── ViewModel types ───────────────────────────────────────────────────────────
@@ -309,6 +329,7 @@ pub enum ScreenView {
     DatasourceList,
     QueryMode,
     PyroscopeMode,
+    TempoMode,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -386,6 +407,13 @@ pub struct ViewModel {
     pub span_heatmap: Option<crate::pyroscope::HeatmapView>,
 
     pub pyroscope_exemplar_index: usize,
+
+    // Tempo state
+    pub tempo_query: String,
+    pub tempo_cursor_pos: usize,
+    pub tempo_loading: bool,
+    pub tempo_error: Option<String>,
+    pub tempo_results: Vec<TempoTrace>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -437,6 +465,7 @@ impl App for ExploreTui {
                         ds.ds_type == "prometheus"
                             || ds.ds_type == "grafana-pyroscope-datasource"
                             || ds.ds_type == "phlare"
+                            || ds.ds_type == "tempo"
                     })
                     .collect();
                 model.datasource_filter.clear();
@@ -716,6 +745,19 @@ impl App for ExploreTui {
                 render()
             }
 
+            // ── Tempo ─────────────────────────────────────────────────────────
+
+            Event::EnterTempo => crate::tempo::app::handle_enter_tempo(model),
+            Event::TempoQueryInput(c) => crate::tempo::app::handle_tempo_query_input(model, c),
+            Event::TempoQueryBackspace => crate::tempo::app::handle_tempo_query_backspace(model),
+            Event::TempoQueryCursorLeft => crate::tempo::app::handle_tempo_cursor_left(model),
+            Event::TempoQueryCursorRight => crate::tempo::app::handle_tempo_cursor_right(model),
+            Event::TempoExecuteQuery => crate::tempo::app::handle_tempo_execute_query(model),
+            Event::TempoResultLoaded(result) => {
+                crate::tempo::app::handle_tempo_result_loaded(model, result)
+            }
+            Event::BackFromTempo => crate::tempo::app::handle_back_from_tempo(model),
+
             Event::SelectDatasource { uid, name } => {
                 model.datasource_filter.clear();
                 model.datasource_filter_focused = false;
@@ -752,6 +794,7 @@ impl App for ExploreTui {
             Screen::DatasourceList => ScreenView::DatasourceList,
             Screen::QueryMode => ScreenView::QueryMode,
             Screen::PyroscopeMode => ScreenView::PyroscopeMode,
+            Screen::TempoMode => ScreenView::TempoMode,
         };
 
         let mut indices = filtered_datasource_indices(model);
@@ -899,6 +942,11 @@ impl App for ExploreTui {
             pyroscope_span_heatmap_error: model.pyroscope_span_heatmap_error.clone(),
             span_heatmap,
             pyroscope_exemplar_index: model.pyroscope_exemplar_index,
+            tempo_query: model.tempo_query.clone(),
+            tempo_cursor_pos: model.tempo_cursor_pos,
+            tempo_loading: model.tempo_loading,
+            tempo_error: model.tempo_error.clone(),
+            tempo_results: model.tempo_results.clone(),
         }
     }
 }

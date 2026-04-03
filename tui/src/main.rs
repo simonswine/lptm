@@ -3,6 +3,7 @@ mod highlight;
 mod http;
 mod prometheus;
 mod pyroscope;
+mod tempo;
 
 use std::collections::HashMap;
 
@@ -210,6 +211,10 @@ async fn main() -> Result<()> {
     result
 }
 
+enum TempoMsg {
+    Result(Result<Vec<shared::TempoTrace>, String>),
+}
+
 enum PyroscopeMsg {
     Series(Result<Vec<(String, String)>, String>),
     Flamegraph(Result<Option<shared::pyroscope::FlameGraph>, String>),
@@ -245,6 +250,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
     let mut debounce_deadline: Option<Instant> = None;
 
     let (pyroscope_tx, mut pyroscope_rx) = mpsc::unbounded_channel::<PyroscopeMsg>();
+    let (tempo_tx, mut tempo_rx) = mpsc::unbounded_channel::<TempoMsg>();
 
     // Heatmap mouse state: last rendered layout + raw slots for popup construction.
     let mut heatmap_layout: Option<pyroscope::heatmap::HeatmapLayout> = None;
@@ -289,6 +295,13 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                             span_heatmap_slots = slots.clone();
                         }
                         app_core.update(Event::PyroscopeSpanHeatmapLoaded(result));
+                    }
+                }
+            }
+            Some(msg) = tempo_rx.recv() => {
+                match msg {
+                    TempoMsg::Result(result) => {
+                        app_core.update(Event::TempoResultLoaded(result));
                     }
                 }
             }
@@ -419,6 +432,25 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                                 );
                                                             }
                                                         }
+                                                    } else if entry.datasource_type == "tempo" {
+                                                        app_core.update(Event::EnterTempo);
+                                                        if !entry.query.is_empty() {
+                                                            for c in entry.query.chars() {
+                                                                app_core.update(Event::TempoQueryInput(c));
+                                                            }
+                                                            let ds_url = app_core.core.view()
+                                                                .datasources
+                                                                .iter()
+                                                                .find(|d| {
+                                                                    (!entry.datasource_uid.is_empty() && d.uid == entry.datasource_uid)
+                                                                        || (entry.datasource_uid.is_empty() && d.name == entry.datasource_name)
+                                                                })
+                                                                .map(|d| d.url.clone());
+                                                            if let Some(url) = ds_url {
+                                                                app_core.update(Event::TempoExecuteQuery);
+                                                                spawn_tempo_search(&tempo_tx, url, entry.query.clone());
+                                                            }
+                                                        }
                                                     } else {
                                                         // Prometheus: enter query mode with
                                                         // the historical query pre-filled.
@@ -498,6 +530,8 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                     vm2.pyroscope_time_range.clone(),
                                                     now,
                                                 );
+                                            } else if ds.ds_type == "tempo" {
+                                                app_core.update(Event::EnterTempo);
                                             } else {
                                                 history_pos = None;
                                                 let ds_name = ds.name.clone();
@@ -889,6 +923,68 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     }
                                 }
                             }
+                            ScreenView::TempoMode => {
+                                match (key.code, key.modifiers) {
+                                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                                    (KeyCode::Esc, _) => {
+                                        app_core.update(Event::BackFromTempo);
+                                    }
+                                    (KeyCode::Enter, _) => {
+                                        let vm2 = app_core.core.view();
+                                        if !vm2.tempo_query.trim().is_empty() {
+                                            let ds_url = vm2
+                                                .datasources
+                                                .get(vm2.selected_index)
+                                                .map(|d| d.url.clone());
+                                            let query = vm2.tempo_query.clone();
+
+                                            // Record history
+                                            if let Some(ds) = vm2.datasources.get(vm2.selected_index) {
+                                                let is_dup = all_history
+                                                    .last()
+                                                    .map(|e| e.query == query && e.datasource_uid == ds.uid)
+                                                    .unwrap_or(false);
+                                                if !is_dup {
+                                                    let entry = HistoryEntry {
+                                                        query: query.clone(),
+                                                        datasource_name: ds.name.clone(),
+                                                        datasource_uid: ds.uid.clone(),
+                                                        datasource_type: ds.ds_type.clone(),
+                                                        grafana_url_hash: url_hash.clone(),
+                                                        timestamp: now_unix_secs(),
+                                                        service_name: None,
+                                                        profile_type: None,
+                                                        time_range: None,
+                                                    };
+                                                    append_history(&entry);
+                                                    all_history.push(entry);
+                                                    app_core.update(Event::HistoryEntriesLoaded(
+                                                        history_views(&all_history, &url_hash),
+                                                    ));
+                                                }
+                                            }
+
+                                            app_core.update(Event::TempoExecuteQuery);
+                                            if let Some(url) = ds_url {
+                                                spawn_tempo_search(&tempo_tx, url, query);
+                                            }
+                                        }
+                                    }
+                                    (KeyCode::Backspace, _) => {
+                                        app_core.update(Event::TempoQueryBackspace);
+                                    }
+                                    (KeyCode::Left, _) => {
+                                        app_core.update(Event::TempoQueryCursorLeft);
+                                    }
+                                    (KeyCode::Right, _) => {
+                                        app_core.update(Event::TempoQueryCursorRight);
+                                    }
+                                    (KeyCode::Char(c), _) => {
+                                        app_core.update(Event::TempoQueryInput(c));
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                     CrosstermEvent::Resize(w, _) => {
@@ -1001,6 +1097,9 @@ fn ui(
         ScreenView::QueryMode => {
             "Ctrl+C: Quit  Esc: Back  Enter: Execute  Tab: Complete  ↓/↑: History/Select  ←/→: Cursor"
         }
+        ScreenView::TempoMode => {
+            "Ctrl+C: Quit  Esc: Back  Enter: Execute  ←/→: Cursor"
+        }
         ScreenView::PyroscopeMode => match vm.pyroscope_sub_screen {
             PyroscopeSubScreenView::ServiceList if vm.pyroscope_profile_type_dropdown_open => {
                 "Esc/Enter/p: Close  j/k: Select profile type"
@@ -1051,6 +1150,12 @@ fn ui(
                 p.render(frame, frame.area(), unit);
             }
             return layout;
+        }
+        ScreenView::TempoMode => {
+            let split =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
+            render_datasource_bar(frame, vm, split[0]);
+            tempo::render_tempo_mode(frame, vm, split[1]);
         }
     }
     None
@@ -1155,6 +1260,7 @@ fn render_datasource_list_panel(frame: &mut Frame, vm: &ViewModel, area: Rect) {
             let type_color = match ds.ds_type.as_str() {
                 "pyroscope" => Color::Magenta,
                 "prometheus" => Color::Green,
+                "tempo" => Color::Cyan,
                 _ => Color::DarkGray,
             };
             Row::new(vec![
@@ -1213,10 +1319,10 @@ fn render_history_panel(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         .iter()
         .map(|e| {
             let ds_short = truncate_str(&e.datasource_name, 12);
-            let type_color = if e.datasource_type == "pyroscope" {
-                Color::Magenta
-            } else {
-                Color::Green
+            let type_color = match e.datasource_type.as_str() {
+                "pyroscope" => Color::Magenta,
+                "tempo" => Color::Cyan,
+                _ => Color::Green,
             };
             let line = Line::from(vec![
                 Span::styled(
@@ -1394,5 +1500,25 @@ fn spawn_span_heatmap_fetch(
             .await
             .map_err(|e| e.to_string());
         let _ = tx2.send(PyroscopeMsg::SpanHeatmap(result));
+    });
+}
+
+// ── Tempo async helpers ───────────────────────────────────────────────────────
+
+fn spawn_tempo_search(
+    tx: &mpsc::UnboundedSender<TempoMsg>,
+    url: String,
+    query: String,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let now_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let start_s = now_s.saturating_sub(3600); // last 1 hour
+        let client = tempo::TempoClient::new(url);
+        let result = client.search(&query, start_s, now_s).await.map_err(|e| e.to_string());
+        let _ = tx.send(TempoMsg::Result(result));
     });
 }
