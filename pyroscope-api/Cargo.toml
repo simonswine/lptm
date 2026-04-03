@@ -1,0 +1,15 @@
+[package]
+name = "pyroscope-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+connectrpc = { version = "0.2", features = ["client"] }
+buffa = { version = "0.2", features = ["json"] }
+http-body = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+
+[build-dependencies]
+connectrpc-build = "0.2"

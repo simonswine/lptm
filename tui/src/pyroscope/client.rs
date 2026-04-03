@@ -3,10 +3,7 @@ use log::debug;
 use reqwest::Client;
 use shared::pyroscope::{FlameGraph, Level};
 
-mod gen {
-    #![allow(dead_code, non_camel_case_types, unused_imports, clippy::all)]
-    include!(concat!(env!("OUT_DIR"), "/_connectrpc.rs"));
-}
+use pyroscope_api as gen;
 
 use gen::querier::v1::{
     HeatmapQueryType, ProfileFormat, SelectHeatmapRequest, SelectHeatmapResponse,
