@@ -48,6 +48,12 @@ impl HeatmapPopup {
                 "  slot[{}] ts={} counts={:?} y_min={:?}",
                 i, s.timestamp_ms, s.counts, s.y_min
             );
+            for (j, e) in s.exemplars.iter().enumerate() {
+                debug!(
+                    "    exemplar[{}] ts={} value={} profile_id={} span_id={} labels={:?}",
+                    j, e.timestamp_ms, e.value, e.profile_id, e.span_id, e.labels
+                );
+            }
         }
 
         let count = *slot.counts.get(bucket_idx)?;
