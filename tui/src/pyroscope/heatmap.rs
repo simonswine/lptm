@@ -244,8 +244,9 @@ impl HeatmapLayout {
 /// Compute the y-axis label width needed for a heatmap view.
 pub fn y_label_width(hm: &HeatmapView, unit: ProfileUnit, max_width: u16) -> u16 {
     let top = unit.format(hm.y_max);
+    let mid = unit.format((hm.y_min + hm.y_max) / 2.0);
     let bot = unit.format(hm.y_min);
-    let w = top.len().max(bot.len()) as u16;
+    let w = top.len().max(mid.len()).max(bot.len()) as u16;
     w.min(max_width / 3)
 }
 
@@ -278,17 +279,24 @@ pub fn render_heatmap(
     let n_cols = hm.columns.len();
     let label_style = Style::default().fg(Color::DarkGray);
 
-    // ── Y-axis labels ─────────────────────────────────────────────────────────
-    frame.render_widget(
-        Paragraph::new(format!("{:>width$}", y_top_label, width = y_label_w as usize))
-            .style(label_style),
-        Rect::new(inner.x, graph_y, y_label_w, 1),
-    );
-    frame.render_widget(
-        Paragraph::new(format!("{:>width$}", y_bot_label, width = y_label_w as usize))
-            .style(label_style),
-        Rect::new(inner.x, graph_y + graph_h - 1, y_label_w, 1),
-    );
+    // ── Y-axis labels (top, middle, bottom) ──────────────────────────────────
+    let y_mid_label = unit.format((hm.y_min + hm.y_max) / 2.0);
+    let mid_row = graph_h / 2;
+    for (label, row) in [
+        (y_top_label.as_str(), 0u16),
+        (y_mid_label.as_str(), mid_row),
+        (y_bot_label.as_str(), graph_h - 1),
+    ] {
+        // Only render the middle label if it won't overlap top or bottom.
+        if row == mid_row && mid_row == 0 || row == mid_row && mid_row == graph_h - 1 {
+            continue;
+        }
+        frame.render_widget(
+            Paragraph::new(format!("{:>width$}", label, width = y_label_w as usize))
+                .style(label_style),
+            Rect::new(inner.x, graph_y + row, y_label_w, 1),
+        );
+    }
 
     // ── Y-axis line ───────────────────────────────────────────────────────────
     for r in 0..graph_h {
