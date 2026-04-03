@@ -618,8 +618,8 @@ mod tests {
         let graph_w = layout.graph_w as usize;
         let graph_h = layout.graph_h as usize;
 
-        // Column for slot 1.
-        let hot_col = 1 * graph_w / n_cols;
+        // First terminal col that maps to slot 1 in the renderer.
+        let hot_col = (1 * graph_w + n_cols - 1) / n_cols;
 
         // The renderer maps display row → column bucket index via:
         //   bucket_idx = row * n_buckets / graph_h
@@ -632,7 +632,7 @@ mod tests {
         let hot_row = (1 * graph_h + hm.n_buckets - 1) / hm.n_buckets;
 
         // Cold: slot 2, raw bucket 2 (highest) → col bucket_idx=0 → display row=0.
-        let cold_col = 2 * graph_w / n_cols;
+        let cold_col = (2 * graph_w + n_cols - 1) / n_cols;
         let cold_row = 0usize;
 
         let hot_cell = buf.get(layout.graph_x + hot_col as u16, layout.graph_y + hot_row as u16);
@@ -749,8 +749,8 @@ mod tests {
         let graph_w = layout.graph_w as usize;
         let graph_h = layout.graph_h as usize;
 
-        // Terminal col of slot 1.
-        let click_col = layout.graph_x + (1 * graph_w / n_cols) as u16;
+        // First terminal col that maps to slot 1 in the renderer.
+        let click_col = layout.graph_x + ((1 * graph_w + n_cols - 1) / n_cols) as u16;
         // Terminal row corresponding to raw bucket 1 in display coords.
         // First display row r where (r * n_buckets / graph_h) == col_bucket_idx=1:
         //   r = ceil(1 * graph_h / n_buckets)
@@ -767,6 +767,81 @@ mod tests {
         assert_eq!(popup.bucket_y_max, 200.0, "popup bucket_y_max wrong");
         // count for slot 1 bucket 1 = 10.
         assert_eq!(popup.count, 10, "popup count wrong");
+    }
+
+    #[test]
+    fn integration_count_levels_visually_distinct() {
+        // Three slots: count=0, count=1, count=1_000_000.
+        // global_max = 1_000_000, so intensities are 0.0, 0.000001, and 1.0.
+        // All three must render as visibly different background colors:
+        //   count=0        → intensity 0.0       → Color::Black
+        //   count=1        → intensity ~0.000001 → rounds to Color::Black (idx 0)
+        //   count=1_000_000 → intensity 1.0      → Color::Rgb(255,0,0)
+        //
+        // This means count=1 and count=0 will look the same when count=1_000_000
+        // exists — that's the current behavior. The important guarantees are:
+        //   1. count=0 is Black.
+        //   2. count=1_000_000 (the global max) is the brightest color.
+        //   3. count=1 vs count=1_000_000 are visually distinct.
+        let slots = vec![
+            HeatmapSlot {
+                timestamp_ms: 0,
+                y_min: vec![0.0, 100.0],
+                counts: vec![0, 0],
+                exemplars: vec![],
+            },
+            HeatmapSlot {
+                timestamp_ms: 1000,
+                y_min: vec![0.0, 100.0],
+                counts: vec![1, 1],
+                exemplars: vec![],
+            },
+            HeatmapSlot {
+                timestamp_ms: 2000,
+                y_min: vec![0.0, 100.0],
+                counts: vec![1_000_000, 1_000_000],
+                exemplars: vec![],
+            },
+        ];
+        let hm = build_heatmap_view(&slots).unwrap();
+        let (terminal, layout) = render_heatmap_to_terminal(&hm, None, false);
+        let buf = terminal.backend().buffer().clone();
+
+        let graph_w = layout.graph_w as usize;
+        let n_cols = hm.columns.len();
+        // The renderer maps terminal col → slot via: slot = col * n_cols / graph_w.
+        // To find the first terminal col that maps to slot k, we need the smallest
+        // col where col * n_cols / graph_w == k, i.e. col = ceil(k * graph_w / n_cols).
+        let col_for_slot = |k: usize| (k * graph_w + n_cols - 1) / n_cols;
+        let zero_col    = col_for_slot(0);
+        let one_col     = col_for_slot(1);
+        let million_col = col_for_slot(2);
+
+        let zero_cell    = buf.get(layout.graph_x + zero_col as u16,    layout.graph_y);
+        let one_cell     = buf.get(layout.graph_x + one_col as u16,     layout.graph_y);
+        let million_cell = buf.get(layout.graph_x + million_col as u16, layout.graph_y);
+
+        assert_eq!(
+            zero_cell.style().bg,
+            Some(ratatui::style::Color::Black),
+            "count=0 must render as Black"
+        );
+        assert_eq!(
+            million_cell.style().bg,
+            Some(ratatui::style::Color::Rgb(255, 0, 0)),
+            "count=1_000_000 (global max) must render as the brightest color Rgb(255,0,0)"
+        );
+        assert_ne!(
+            one_cell.style().bg,
+            Some(ratatui::style::Color::Black),
+            "count=1 must not render as Black even when global_max is 1_000_000, got {:?}",
+            one_cell.style().bg,
+        );
+        assert_ne!(
+            one_cell.style().bg,
+            million_cell.style().bg,
+            "count=1 and count=1_000_000 must not render the same color"
+        );
     }
 
     #[test]

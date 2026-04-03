@@ -783,13 +783,25 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
     };
 
     // Columns: each slot → one column; row 0 = highest bucket.
+    // count=0  → intensity 0.0  (transparent/black, no activity).
+    // count>0  → intensity in (0, 1]: linearly normalised but clamped to
+    //            at least 1/(PALETTE_SIZE-1) so that even a single sample
+    //            always renders as the first non-black colour regardless of
+    //            how large the global maximum is.
+    const MIN_NONZERO: f64 = 1.0 / 9.0; // 1 / (palette size − 1)
     let columns: Vec<Vec<f64>> = slots
         .iter()
         .map(|slot| {
             slot.counts
                 .iter()
                 .rev()
-                .map(|&c| c as f64 / global_max)
+                .map(|&c| {
+                    if c == 0 {
+                        0.0
+                    } else {
+                        (c as f64 / global_max).max(MIN_NONZERO)
+                    }
+                })
                 .collect()
         })
         .collect();
