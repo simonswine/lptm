@@ -194,13 +194,43 @@ impl HeatmapLayout {
         col.min(w.saturating_sub(1)) as u16
     }
 
-    /// Map a value to a pixel row using the same bucket→pixel formula as the
+    /// Map a value to a pixel row using the **same** bucket→pixel formula as the
     /// renderer (`bucket_idx = row * n_buckets / h`, columns stored reversed).
+    ///
+    /// The renderer assigns bucket `b` (0 = lowest raw bucket) to display rows where
+    /// `row * n_buckets / h == n_buckets - 1 - b` (columns are stored with `.rev()`).
+    ///
+    /// We find the raw bucket via binary search on `hm.bucket_bounds` (handles
+    /// non-uniform/exponential spacing), then map to the centre of that bucket's
+    /// pixel range — identical to how `ts_to_col` mirrors the slot mapping.
     pub fn value_to_row(&self, value: f64, hm: &HeatmapView) -> u16 {
         let h = self.graph_h as usize;
-        let y_span = (hm.y_max - hm.y_min).max(f64::EPSILON);
-        let row = ((1.0 - (value - hm.y_min) / y_span).clamp(0.0, 1.0) * h as f64) as usize;
-        row.min(h.saturating_sub(1)) as u16
+        let n = hm.n_buckets;
+
+        if n == 0 || h == 0 {
+            return 0;
+        }
+
+        // Find raw bucket index via binary search on lower bounds.
+        let raw_bucket = if hm.bucket_bounds.len() == n {
+            let b = hm.bucket_bounds.partition_point(|&lb| lb <= value);
+            b.saturating_sub(1).min(n - 1)
+        } else {
+            // Fallback: linear interpolation (uniform buckets assumed).
+            let y_span = (hm.y_max - hm.y_min).max(f64::EPSILON);
+            ((value - hm.y_min) / y_span * n as f64) as usize
+        }
+        .min(n - 1);
+
+        // Columns are stored reversed: col_bucket_idx = n - 1 - raw_bucket
+        // (row 0 = col_bucket_idx 0 = raw bucket n-1, i.e. highest value).
+        let col_bucket = n - 1 - raw_bucket;
+
+        // First pixel row for col_bucket_idx b: ceil(b * h / n).
+        let r_first = (col_bucket * h + n - 1) / n;
+        let r_next  = ((col_bucket + 1) * h + n - 1) / n;
+        let mid = r_first + r_next.saturating_sub(r_first) / 2;
+        mid.min(h.saturating_sub(1)) as u16
     }
 
     /// Map a data-space `(timestamp_ms, value)` exemplar to a terminal cell
@@ -585,6 +615,109 @@ mod tests {
             "bottom row should map to lowest raw bucket (index 0), got {}",
             bucket
         );
+    }
+
+    /// Build a HeatmapView with explicit non-uniform bucket bounds (like
+    /// exponential latency buckets). Useful for value_to_row tests.
+    fn make_heatmap_nonuniform_buckets() -> (HeatmapView, Vec<HeatmapSlot>) {
+        // Exponential-ish latency buckets (nanoseconds): 1ms, 2ms, 5ms, 10ms, 20ms, 50ms, 100ms
+        let bounds: Vec<f64> = vec![
+            1_000_000.0,
+            2_000_000.0,
+            5_000_000.0,
+            10_000_000.0,
+            20_000_000.0,
+            50_000_000.0,
+            100_000_000.0,
+        ];
+        let n = bounds.len();
+        let step_ms = 10_000i64;
+        let exemplar = shared::pyroscope::TimelineExemplar {
+            labels: vec![],
+            profile_id: "p1".into(),
+            span_id: String::new(),
+            value: 8_000_000, // 8ms → falls in bucket 2 (bounds[2]=5ms..bounds[3]=10ms)
+            timestamp_ms: step_ms / 2,
+        };
+        let slots = vec![HeatmapSlot {
+            timestamp_ms: step_ms,
+            step_ms,
+            y_min: bounds.clone(),
+            counts: vec![1; n],
+            exemplars: vec![exemplar],
+        }];
+        let hm = build_heatmap_view(&slots).unwrap();
+        (hm, slots)
+    }
+
+    #[test]
+    fn value_to_row_uniform_buckets_matches_renderer() {
+        // With uniform buckets, value_to_row must map to the same row that the
+        // renderer assigns to that bucket.
+        let hm = make_heatmap(1, 8, 10_000);
+        let (layout, _) = make_layout(20, 16);
+        let n = hm.n_buckets;
+        let h = layout.graph_h as usize;
+
+        for raw_b in 0..n {
+            // Pick a value in the middle of this bucket's range.
+            let bw = (hm.y_max - hm.y_min) / n as f64;
+            let value = hm.y_min + (raw_b as f64 + 0.5) * bw;
+            let row = layout.value_to_row(value, &hm) as usize;
+
+            // What bucket does the renderer assign to this row?
+            let col_bucket = row * n / h;
+            let renderer_raw_bucket = n - 1 - col_bucket;
+
+            assert_eq!(
+                renderer_raw_bucket, raw_b,
+                "value {value} in raw bucket {raw_b}: row={row} -> renderer bucket {renderer_raw_bucket}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_to_row_nonuniform_buckets_matches_renderer() {
+        // With exponential buckets, linear interpolation would give wrong results.
+        // value_to_row must use bucket_bounds lookup.
+        let (hm, _) = make_heatmap_nonuniform_buckets();
+        assert!(!hm.bucket_bounds.is_empty(), "bucket_bounds must be populated");
+        let (layout, _) = make_layout(20, 14);
+        let n = hm.n_buckets;
+        let h = layout.graph_h as usize;
+
+        // Verify every bucket: value at lower bound of bucket b maps to a row
+        // the renderer assigns to bucket b.
+        for raw_b in 0..n {
+            let value = hm.bucket_bounds[raw_b] + 1.0; // just above lower bound
+            let row = layout.value_to_row(value, &hm) as usize;
+            let col_bucket = row * n / h;
+            let renderer_raw_bucket = n - 1 - col_bucket;
+            assert_eq!(
+                renderer_raw_bucket, raw_b,
+                "bucket {raw_b} (value {value}): row={row} -> renderer bucket {renderer_raw_bucket}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_to_row_exemplar_8ms_in_correct_bucket() {
+        // The exemplar at 8ms must land in bucket 2 (5ms..10ms), not bucket 3.
+        // Linear interpolation over [1ms, 100ms+] would place 8ms at ~7% of the
+        // way up, which with 7 buckets gives bucket 0 or 1 — wrong.
+        let (hm, _) = make_heatmap_nonuniform_buckets();
+        let (layout, _) = make_layout(20, 14);
+        let n = hm.n_buckets;
+        let h = layout.graph_h as usize;
+
+        let exemplar_value = 8_000_000.0_f64; // 8ms
+        let row = layout.value_to_row(exemplar_value, &hm) as usize;
+        let col_bucket = row * n / h;
+        let renderer_raw_bucket = n - 1 - col_bucket;
+
+        // 8ms is between bucket_bounds[2]=5ms and bucket_bounds[3]=10ms → raw bucket 2
+        assert_eq!(renderer_raw_bucket, 2,
+            "8ms exemplar must land in raw bucket 2 (5ms–10ms), got bucket {renderer_raw_bucket} at row {row}");
     }
 
     #[test]
