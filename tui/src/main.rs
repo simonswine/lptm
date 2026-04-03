@@ -904,6 +904,13 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                 vm.pyroscope_sub_screen,
                                 PyroscopeSubScreenView::ProfileHeatmap | PyroscopeSubScreenView::SpanHeatmap
                             );
+                            info!(
+                                "mouse left click at ({},{}) is_heatmap={} layout={} hm_slots={} span_slots={}",
+                                me.column, me.row, is_heatmap,
+                                heatmap_layout.is_some(),
+                                heatmap_slots.len(),
+                                span_heatmap_slots.len(),
+                            );
                             if is_heatmap {
                                 if let Some(ref layout) = heatmap_layout {
                                     let slots = if vm.pyroscope_sub_screen == PyroscopeSubScreenView::SpanHeatmap {
@@ -916,6 +923,12 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     } else {
                                         vm.heatmap.as_ref()
                                     };
+                                    info!(
+                                        "heatmap layout={:?} hm={} slots={}",
+                                        layout,
+                                        hm_view.is_some(),
+                                        slots.len(),
+                                    );
                                     if let Some(hm) = hm_view {
                                         let new_popup = pyroscope::heatmap::HeatmapPopup::from_click(
                                             me.column, me.row, layout, hm, slots,

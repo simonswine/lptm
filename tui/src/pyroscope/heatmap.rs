@@ -357,8 +357,10 @@ pub fn render_heatmap(
 
 #[cfg(test)]
 mod tests {
+    use ratatui::{Terminal, backend::TestBackend};
+    use shared::pyroscope::{TimelineExemplar, build_heatmap_view};
     use super::*;
-    use shared::pyroscope::{HeatmapSlot, build_heatmap_view};
+    use shared::pyroscope::{HeatmapSlot};
 
     /// Build a minimal HeatmapView from explicit slot data.
     fn make_heatmap(n_slots: usize, n_buckets: usize, step_ms: i64) -> HeatmapView {
@@ -536,5 +538,253 @@ mod tests {
                 "slot {i} at ts {ts} should map to col {slot_col}, got {col}"
             );
         }
+    }
+
+    // ── Integration tests: render into a TestBackend and inspect the buffer ───
+
+    /// Build a small heatmap: 4 time slots, 3 value buckets, with one exemplar
+    /// in the middle slot/bucket. Returns both the HeatmapView and the raw slots.
+    fn make_heatmap_with_exemplar() -> (HeatmapView, Vec<HeatmapSlot>) {
+        //  Buckets (y_min lower bounds): 0, 100, 200  →  y_max = 300
+        //  Slots at t=0, 1000, 2000, 3000 ms
+        //  Slot 1 (t=1000) has a hot bucket 1 (count=10) and an exemplar at value=150
+        let exemplar = TimelineExemplar {
+            labels: vec![("pod".into(), "pod-a".into())],
+            profile_id: "prof-001".into(),
+            span_id: String::new(),
+            value: 150,
+            timestamp_ms: 1000,
+        };
+        let slots = vec![
+            HeatmapSlot {
+                timestamp_ms: 0,
+                y_min: vec![0.0, 100.0, 200.0],
+                counts: vec![1, 1, 1],
+                exemplars: vec![],
+            },
+            HeatmapSlot {
+                timestamp_ms: 1000,
+                y_min: vec![0.0, 100.0, 200.0],
+                counts: vec![1, 10, 1],   // bucket 1 is hot
+                exemplars: vec![exemplar],
+            },
+            HeatmapSlot {
+                timestamp_ms: 2000,
+                y_min: vec![0.0, 100.0, 200.0],
+                counts: vec![1, 1, 1],
+                exemplars: vec![],
+            },
+            HeatmapSlot {
+                timestamp_ms: 3000,
+                y_min: vec![0.0, 100.0, 200.0],
+                counts: vec![1, 1, 1],
+                exemplars: vec![],
+            },
+        ];
+        let hm = build_heatmap_view(&slots).unwrap();
+        (hm, slots)
+    }
+
+    /// Render the heatmap into a TestBackend and return (terminal, layout).
+    /// Terminal is 60 wide × 20 tall; the heatmap block occupies all of it.
+    fn render_heatmap_to_terminal(
+        hm: &HeatmapView,
+        highlight: Option<(i64, f64)>,
+        blink_on: bool,
+    ) -> (Terminal<TestBackend>, HeatmapLayout) {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut layout_out = None;
+        terminal.draw(|frame| {
+            let area = frame.area();
+            let block = ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .title(" Heatmap ");
+            let layout = render_heatmap(frame, hm, block, area, ProfileUnit::Nanoseconds, highlight, blink_on);
+            layout_out = layout;
+        }).unwrap();
+        (terminal, layout_out.expect("heatmap layout must be returned"))
+    }
+
+    #[test]
+    fn integration_hot_slot_has_brighter_background() {
+        let (hm, _) = make_heatmap_with_exemplar();
+        let (terminal, layout) = render_heatmap_to_terminal(&hm, None, false);
+        let buf = terminal.backend().buffer().clone();
+
+        // Slot 1 bucket 1 (count=10) is the global max → intensity = 1.0 → bright red.
+        // All other cells have count=1 → intensity = 0.1 → near-black.
+        let n_cols = hm.columns.len();
+        let graph_w = layout.graph_w as usize;
+        let graph_h = layout.graph_h as usize;
+
+        // Column for slot 1.
+        let hot_col = 1 * graph_w / n_cols;
+
+        // The renderer maps display row → column bucket index via:
+        //   bucket_idx = row * n_buckets / graph_h
+        // and the columns were built with .rev() so:
+        //   column[bucket_idx] corresponds to raw bucket (n_buckets - 1 - bucket_idx)
+        //
+        // We want raw bucket 1 → col bucket_idx = n_buckets - 1 - 1 = 1.
+        // First row r where (r * n_buckets / graph_h) == 1:
+        //   r = ceil(1 * graph_h / n_buckets) = (graph_h + n_buckets - 1) / n_buckets
+        let hot_row = (1 * graph_h + hm.n_buckets - 1) / hm.n_buckets;
+
+        // Cold: slot 2, raw bucket 2 (highest) → col bucket_idx=0 → display row=0.
+        let cold_col = 2 * graph_w / n_cols;
+        let cold_row = 0usize;
+
+        let hot_cell = buf.get(layout.graph_x + hot_col as u16, layout.graph_y + hot_row as u16);
+        let cold_cell = buf.get(layout.graph_x + cold_col as u16, layout.graph_y + cold_row as u16);
+
+        assert_ne!(
+            hot_cell.style().bg,
+            cold_cell.style().bg,
+            "hot cell bg={:?} should differ from cold cell bg={:?}",
+            hot_cell.style().bg, cold_cell.style().bg,
+        );
+    }
+
+    #[test]
+    fn integration_axes_labels_present() {
+        let (hm, _) = make_heatmap_with_exemplar();
+        let (terminal, _layout) = render_heatmap_to_terminal(&hm, None, false);
+
+        // Collect all rendered text from the buffer.
+        let buf = terminal.backend().buffer().clone();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+
+        // Y-axis labels: y_min=0 and y_max=300 formatted as nanoseconds.
+        assert!(text.contains("0ns") || text.contains("0 ns"), "y_min label missing: {text:?}");
+
+        // X-axis should show time labels (hh:mm:ss format).
+        assert!(text.contains("00:00:00"), "x-axis start time label missing");
+    }
+
+    #[test]
+    fn integration_exemplar_table_shows_time_and_value() {
+        let (hm, _) = make_heatmap_with_exemplar();
+
+        // Render heatmap in upper 60% and exemplar table in lower 40%.
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            let area = frame.area();
+            let [vis_area, table_area] =
+                ratatui::layout::Layout::vertical([
+                    ratatui::layout::Constraint::Percentage(60),
+                    ratatui::layout::Constraint::Percentage(40),
+                ])
+                .areas(area);
+
+            let block = ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .title(" Heatmap ");
+            render_heatmap(frame, &hm, block, vis_area, ProfileUnit::Nanoseconds, None, false);
+
+            let exemplars: Vec<_> = hm.exemplars.iter().collect();
+            crate::pyroscope::ui::render_exemplars(
+                frame,
+                &exemplars,
+                &hm.varying_label_keys,
+                table_area,
+                ProfileUnit::Nanoseconds,
+                0, // first exemplar selected
+            );
+        }).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+
+        // The exemplar at ts=1000ms (00:00:01) with value=150ns should appear in the table.
+        assert!(text.contains("00:00:01"), "exemplar time missing from table: {text:?}");
+        assert!(text.contains("150"), "exemplar value missing from table: {text:?}");
+        // The profile_id should appear.
+        assert!(text.contains("prof-001"), "exemplar profile_id missing from table: {text:?}");
+        // Column headers.
+        assert!(text.contains("Time"), "Time header missing");
+        assert!(text.contains("Value"), "Value header missing");
+    }
+
+    #[test]
+    fn integration_selected_exemplar_row_has_highlight_style() {
+        let (hm, _) = make_heatmap_with_exemplar();
+
+        let backend = TestBackend::new(80, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            let table_area = frame.area();
+            let exemplars: Vec<_> = hm.exemplars.iter().collect();
+            crate::pyroscope::ui::render_exemplars(
+                frame,
+                &exemplars,
+                &hm.varying_label_keys,
+                table_area,
+                ProfileUnit::Nanoseconds,
+                0, // row 0 selected
+            );
+        }).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        // Find the ">>" highlight symbol — ratatui's TableState highlight_symbol.
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains(">>"), "selected row highlight symbol '>>' missing");
+
+        // The selected row cells should have the magenta foreground style.
+        let magenta_cell = buf.content().iter().find(|c| {
+            c.style().fg == Some(ratatui::style::Color::Magenta)
+        });
+        assert!(magenta_cell.is_some(), "no cell with magenta fg found for selected row");
+    }
+
+    #[test]
+    fn integration_popup_shows_correct_bucket_for_click() {
+        let (hm, slots) = make_heatmap_with_exemplar();
+        let (terminal, layout) = render_heatmap_to_terminal(&hm, None, false);
+        let _ = terminal;
+
+        // Click on the hot cell: slot 1, bucket 1.
+        let n_cols = hm.columns.len();
+        let graph_w = layout.graph_w as usize;
+        let graph_h = layout.graph_h as usize;
+
+        // Terminal col of slot 1.
+        let click_col = layout.graph_x + (1 * graph_w / n_cols) as u16;
+        // Terminal row corresponding to raw bucket 1 in display coords.
+        // First display row r where (r * n_buckets / graph_h) == col_bucket_idx=1:
+        //   r = ceil(1 * graph_h / n_buckets)
+        let display_row = (1 * graph_h + hm.n_buckets - 1) / hm.n_buckets;
+        let click_row = layout.graph_y + display_row as u16;
+
+        let popup = HeatmapPopup::from_click(click_col, click_row, &layout, &hm, &slots)
+            .expect("click inside graph should produce a popup");
+
+        // slot 1 timestamp = 1000ms.
+        assert_eq!(popup.slot_start_ms, 1000, "popup slot_start_ms wrong");
+        // bucket 1: y_min=100.0, y_max=200.0 (bucket_step=100).
+        assert_eq!(popup.bucket_y_min, 100.0, "popup bucket_y_min wrong");
+        assert_eq!(popup.bucket_y_max, 200.0, "popup bucket_y_max wrong");
+        // count for slot 1 bucket 1 = 10.
+        assert_eq!(popup.count, 10, "popup count wrong");
+    }
+
+    #[test]
+    fn integration_click_outside_graph_returns_none() {
+        let (hm, slots) = make_heatmap_with_exemplar();
+        let (terminal, layout) = render_heatmap_to_terminal(&hm, None, false);
+        let _ = terminal;
+
+        // Click on the y-axis label area (left of graph_x).
+        let popup = HeatmapPopup::from_click(
+            layout.graph_x.saturating_sub(1), layout.graph_y, &layout, &hm, &slots,
+        );
+        assert!(popup.is_none(), "click on y-axis label should return None");
+
+        // Click on x-axis label area (below graph).
+        let popup = HeatmapPopup::from_click(
+            layout.graph_x, layout.graph_y + layout.graph_h, &layout, &hm, &slots,
+        );
+        assert!(popup.is_none(), "click on x-axis row should return None");
     }
 }

@@ -602,7 +602,7 @@ fn render_timeline_exemplars(
     render_exemplars(frame, &exemplars, &tl.varying_label_keys, area, unit, selected_idx);
 }
 
-fn render_exemplars(
+pub(super) fn render_exemplars(
     frame: &mut Frame,
     exemplars: &[&shared::pyroscope::types::TimelineExemplar],
     varying_label_keys: &[String],
