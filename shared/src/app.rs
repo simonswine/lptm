@@ -827,22 +827,7 @@ impl App for ExploreTui {
             crate::pyroscope::build_timeline_view(&model.pyroscope_timeline)
         };
 
-        let heatmap = if model.pyroscope_heatmap.is_empty() {
-            None
-        } else {
-            crate::pyroscope::build_heatmap_view(&model.pyroscope_heatmap).map(|mut hm| {
-                let mut exemplars: Vec<crate::pyroscope::TimelineExemplar> = model
-                    .pyroscope_timeline
-                    .iter()
-                    .flat_map(|s| s.exemplars.iter().cloned())
-                    .collect();
-                exemplars.sort_by(|a, b| b.value.cmp(&a.value));
-                hm.varying_label_keys =
-                    crate::pyroscope::compute_varying_label_keys_exemplars(&exemplars);
-                hm.exemplars = exemplars;
-                hm
-            })
-        };
+        let heatmap = crate::pyroscope::build_heatmap_view(&model.pyroscope_heatmap);
 
         let span_heatmap = crate::pyroscope::build_heatmap_view(&model.pyroscope_span_heatmap);
 
