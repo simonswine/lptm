@@ -438,17 +438,17 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                             for c in entry.query.chars() {
                                                                 app_core.update(Event::TempoQueryInput(c));
                                                             }
-                                                            let ds_url = app_core.core.view()
+                                                            let ds_uid = app_core.core.view()
                                                                 .datasources
                                                                 .iter()
                                                                 .find(|d| {
                                                                     (!entry.datasource_uid.is_empty() && d.uid == entry.datasource_uid)
                                                                         || (entry.datasource_uid.is_empty() && d.name == entry.datasource_name)
                                                                 })
-                                                                .map(|d| d.url.clone());
-                                                            if let Some(url) = ds_url {
+                                                                .map(|d| d.uid.clone());
+                                                            if let Some(uid) = ds_uid {
                                                                 app_core.update(Event::TempoExecuteQuery);
-                                                                spawn_tempo_search(&tempo_tx, url, entry.query.clone());
+                                                                spawn_tempo_search(&tempo_tx, grafana_url.clone(), uid, grafana_token.clone(), entry.query.clone());
                                                             }
                                                         }
                                                     } else {
@@ -932,10 +932,10 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     (KeyCode::Enter, _) => {
                                         let vm2 = app_core.core.view();
                                         if !vm2.tempo_query.trim().is_empty() {
-                                            let ds_url = vm2
+                                            let ds_uid = vm2
                                                 .datasources
                                                 .get(vm2.selected_index)
-                                                .map(|d| d.url.clone());
+                                                .map(|d| d.uid.clone());
                                             let query = vm2.tempo_query.clone();
 
                                             // Record history
@@ -965,8 +965,8 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                             }
 
                                             app_core.update(Event::TempoExecuteQuery);
-                                            if let Some(url) = ds_url {
-                                                spawn_tempo_search(&tempo_tx, url, query);
+                                            if let Some(uid) = ds_uid {
+                                                spawn_tempo_search(&tempo_tx, grafana_url.clone(), uid, grafana_token.clone(), query);
                                             }
                                         }
                                     }
@@ -1507,7 +1507,9 @@ fn spawn_span_heatmap_fetch(
 
 fn spawn_tempo_search(
     tx: &mpsc::UnboundedSender<TempoMsg>,
-    url: String,
+    grafana_url: String,
+    uid: String,
+    token: String,
     query: String,
 ) {
     let tx = tx.clone();
@@ -1517,7 +1519,7 @@ fn spawn_tempo_search(
             .unwrap_or_default()
             .as_secs();
         let start_s = now_s.saturating_sub(3600); // last 1 hour
-        let client = tempo::TempoClient::new(url);
+        let client = tempo::TempoClient::new(grafana_url, uid, token);
         let result = client.search(&query, start_s, now_s).await.map_err(|e| e.to_string());
         let _ = tx.send(TempoMsg::Result(result));
     });
