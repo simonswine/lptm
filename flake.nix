@@ -24,6 +24,7 @@
             [
               rustup
               pkg-config
+	      protobuf_33
             ]
             ++ lib.optionals stdenv.isDarwin [
               libiconv
