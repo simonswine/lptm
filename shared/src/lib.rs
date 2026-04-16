@@ -1,4 +1,5 @@
 pub mod app;
+pub mod loki;
 pub mod prometheus;
 pub mod pyroscope;
 pub mod tempo;

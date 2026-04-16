@@ -1,0 +1,91 @@
+use ratatui::{
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    Frame,
+};
+use shared::ViewModel;
+
+pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+    let split = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
+
+    // ── Query input ───────────────────────────────────────────────────────────
+    let query_block = Block::default().borders(Borders::ALL).title(" LogQL ");
+
+    let before = &vm.loki_query[..vm.loki_cursor_pos];
+    let after = &vm.loki_query[vm.loki_cursor_pos..];
+    let cursor_char = after.chars().next().map(|c| c.to_string()).unwrap_or_else(|| " ".into());
+    let after_cursor: String = after.chars().skip(1).collect();
+
+    let query_line = Line::from(vec![
+        Span::raw(before.to_owned()),
+        Span::styled(cursor_char, Style::default().fg(Color::Black).bg(Color::White)),
+        Span::raw(after_cursor),
+    ]);
+    frame.render_widget(Paragraph::new(query_line).block(query_block), split[0]);
+
+    // ── Results area ──────────────────────────────────────────────────────────
+    let results_block = Block::default().borders(Borders::ALL).title(" Logs ");
+
+    if vm.loki_loading {
+        frame.render_widget(
+            Paragraph::new("Searching…").block(results_block),
+            split[1],
+        );
+        return;
+    }
+
+    if let Some(ref err) = vm.loki_error {
+        frame.render_widget(
+            Paragraph::new(format!("Error: {err}"))
+                .style(Style::default().fg(Color::Red))
+                .block(results_block),
+            split[1],
+        );
+        return;
+    }
+
+    if vm.loki_results.is_empty() {
+        let hint = if vm.loki_query.trim().is_empty() {
+            "Type a LogQL expression and press Enter.  Example: {job=\"varlogs\"}"
+        } else {
+            "No logs found."
+        };
+        frame.render_widget(
+            Paragraph::new(hint)
+                .style(Style::default().fg(Color::DarkGray))
+                .block(results_block),
+            split[1],
+        );
+        return;
+    }
+
+    let header = Row::new(["Timestamp", "Labels", "Log Line"].iter().map(|h| {
+        Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    }));
+
+    let rows: Vec<Row> = vm
+        .loki_results
+        .iter()
+        .flat_map(|stream| {
+            stream.entries.iter().map(move |entry| {
+                Row::new(vec![
+                    Cell::from(entry.timestamp.clone()),
+                    Cell::from(stream.labels.clone())
+                        .style(Style::default().fg(Color::Yellow)),
+                    Cell::from(entry.line.clone()),
+                ])
+            })
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(24),
+        Constraint::Length(40),
+        Constraint::Fill(1),
+    ];
+
+    let table = Table::new(rows, widths).header(header).block(results_block);
+    frame.render_widget(table, split[1]);
+}

@@ -1,6 +1,7 @@
 mod core;
 mod highlight;
 mod http;
+mod loki;
 mod prometheus;
 mod pyroscope;
 mod tempo;
@@ -218,6 +219,10 @@ enum TempoMsg {
     SpanTraceLoadingDone,
 }
 
+enum LokiMsg {
+    Result(Result<Vec<shared::loki::LokiStream>, String>),
+}
+
 enum PyroscopeMsg {
     Series(Result<Vec<(String, String)>, String>),
     Flamegraph(Result<Option<shared::pyroscope::FlameGraph>, String>),
@@ -254,6 +259,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
 
     let (pyroscope_tx, mut pyroscope_rx) = mpsc::unbounded_channel::<PyroscopeMsg>();
     let (tempo_tx, mut tempo_rx) = mpsc::unbounded_channel::<TempoMsg>();
+    let (loki_tx, mut loki_rx) = mpsc::unbounded_channel::<LokiMsg>();
 
     macro_rules! draw {
         ($term:expr, $vm:expr) => {{
@@ -298,6 +304,13 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                     }
                     TempoMsg::SpanTraceLoadingDone => {
                         app_core.update(Event::SpanHeatmapTempoLoadingDone);
+                    }
+                }
+            }
+            Some(msg) = loki_rx.recv() => {
+                match msg {
+                    LokiMsg::Result(result) => {
+                        app_core.update(Event::LokiResultLoaded(result));
                     }
                 }
             }
@@ -447,6 +460,25 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                                 spawn_tempo_search(&tempo_tx, grafana_url.clone(), uid, grafana_token.clone(), entry.query.clone());
                                                             }
                                                         }
+                                                    } else if entry.datasource_type == "loki" {
+                                                        app_core.update(Event::EnterLoki);
+                                                        if !entry.query.is_empty() {
+                                                            for c in entry.query.chars() {
+                                                                app_core.update(Event::LokiQueryInput(c));
+                                                            }
+                                                            let ds_id = app_core.core.view()
+                                                                .datasources
+                                                                .iter()
+                                                                .find(|d| {
+                                                                    (!entry.datasource_uid.is_empty() && d.uid == entry.datasource_uid)
+                                                                        || (entry.datasource_uid.is_empty() && d.name == entry.datasource_name)
+                                                                })
+                                                                .map(|d| d.id);
+                                                            if let Some(ds_id) = ds_id {
+                                                                app_core.update(Event::LokiExecuteQuery);
+                                                                spawn_loki_query(&loki_tx, grafana_url.clone(), ds_id, grafana_token.clone(), entry.query.clone());
+                                                            }
+                                                        }
                                                     } else {
                                                         // Prometheus: enter query mode with
                                                         // the historical query pre-filled.
@@ -528,6 +560,8 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 );
                                             } else if ds.ds_type == "tempo" {
                                                 app_core.update(Event::EnterTempo);
+                                            } else if ds.ds_type == "loki" {
+                                                app_core.update(Event::EnterLoki);
                                             } else {
                                                 history_pos = None;
                                                 let ds_name = ds.name.clone();
@@ -1109,6 +1143,68 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     _ => {}
                                 }
                             }
+                            ScreenView::LokiMode => {
+                                match (key.code, key.modifiers) {
+                                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                                    (KeyCode::Esc, _) => {
+                                        app_core.update(Event::BackFromLoki);
+                                    }
+                                    (KeyCode::Enter, _) => {
+                                        let vm2 = app_core.core.view();
+                                        if !vm2.loki_query.trim().is_empty() {
+                                            let ds_id = vm2
+                                                .datasources
+                                                .get(vm2.selected_index)
+                                                .map(|d| d.id);
+                                            let query = vm2.loki_query.clone();
+
+                                            // Record history
+                                            if let Some(ds) = vm2.datasources.get(vm2.selected_index) {
+                                                let is_dup = all_history
+                                                    .last()
+                                                    .map(|e| e.query == query && e.datasource_uid == ds.uid)
+                                                    .unwrap_or(false);
+                                                if !is_dup {
+                                                    let entry = HistoryEntry {
+                                                        query: query.clone(),
+                                                        datasource_name: ds.name.clone(),
+                                                        datasource_uid: ds.uid.clone(),
+                                                        datasource_type: ds.ds_type.clone(),
+                                                        grafana_url_hash: url_hash.clone(),
+                                                        timestamp: now_unix_secs(),
+                                                        service_name: None,
+                                                        profile_type: None,
+                                                        time_range: None,
+                                                    };
+                                                    append_history(&entry);
+                                                    all_history.push(entry);
+                                                    app_core.update(Event::HistoryEntriesLoaded(
+                                                        history_views(&all_history, &url_hash),
+                                                    ));
+                                                }
+                                            }
+
+                                            app_core.update(Event::LokiExecuteQuery);
+                                            if let Some(ds_id) = ds_id {
+                                                spawn_loki_query(&loki_tx, grafana_url.clone(), ds_id, grafana_token.clone(), query);
+                                            }
+                                        }
+                                    }
+                                    (KeyCode::Backspace, _) => {
+                                        app_core.update(Event::LokiQueryBackspace);
+                                    }
+                                    (KeyCode::Left, _) => {
+                                        app_core.update(Event::LokiQueryCursorLeft);
+                                    }
+                                    (KeyCode::Right, _) => {
+                                        app_core.update(Event::LokiQueryCursorRight);
+                                    }
+                                    (KeyCode::Char(c), _) => {
+                                        app_core.update(Event::LokiQueryInput(c));
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                     CrosstermEvent::Resize(w, _) => {
@@ -1177,6 +1273,9 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
         ScreenView::TempoMode => {
             "Ctrl+C: Quit  Esc: Back  Enter: Execute  ←/→: Cursor"
         }
+        ScreenView::LokiMode => {
+            "Ctrl+C: Quit  Esc: Back  Enter: Execute  ←/→: Cursor"
+        }
         ScreenView::PyroscopeMode => match vm.pyroscope_sub_screen {
             PyroscopeSubScreenView::ServiceList if vm.pyroscope_profile_type_dropdown_open => {
                 "Esc/Enter/p: Close  j/k: Select profile type"
@@ -1233,6 +1332,12 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
                 Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
             render_datasource_bar(frame, vm, split[0]);
             tempo::render_tempo_mode(frame, vm, split[1]);
+        }
+        ScreenView::LokiMode => {
+            let split =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
+            render_datasource_bar(frame, vm, split[0]);
+            loki::render_loki_mode(frame, vm, split[1]);
         }
     }
 }
@@ -1337,6 +1442,7 @@ fn render_datasource_list_panel(frame: &mut Frame, vm: &ViewModel, area: Rect) {
                 "pyroscope" => Color::Magenta,
                 "prometheus" => Color::Green,
                 "tempo" => Color::Cyan,
+                "loki" => Color::Yellow,
                 _ => Color::DarkGray,
             };
             Row::new(vec![
@@ -1398,6 +1504,7 @@ fn render_history_panel(frame: &mut Frame, vm: &ViewModel, area: Rect) {
             let type_color = match e.datasource_type.as_str() {
                 "pyroscope" => Color::Magenta,
                 "tempo" => Color::Cyan,
+                "loki" => Color::Yellow,
                 _ => Color::Green,
             };
             let line = Line::from(vec![
@@ -1648,5 +1755,30 @@ fn spawn_tempo_search(
         let client = tempo::TempoClient::new(grafana_url, uid, token);
         let result = client.search(&query, start_s, now_s).await.map_err(|e| e.to_string());
         let _ = tx.send(TempoMsg::Result(result));
+    });
+}
+
+// ── Loki async helpers ───────────────────────────────────────────────────────
+
+fn spawn_loki_query(
+    tx: &mpsc::UnboundedSender<LokiMsg>,
+    grafana_url: String,
+    ds_id: u64,
+    token: String,
+    query: String,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let start_ns = now_ns.saturating_sub(3600 * 1_000_000_000); // last 1 hour
+        let client = loki::LokiClient::new(grafana_url, ds_id, token);
+        let result = client
+            .query_range(&query, start_ns, now_ns, 1000)
+            .await
+            .map_err(|e| e.to_string());
+        let _ = tx.send(LokiMsg::Result(result));
     });
 }
