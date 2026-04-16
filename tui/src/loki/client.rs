@@ -45,12 +45,13 @@ impl LokiClient {
         start_ns: u64,
         end_ns: u64,
         limit: u32,
+        direction: &str,
     ) -> Result<Vec<LokiStream>> {
         let url = format!(
             "{}/api/datasources/proxy/{}/loki/api/v1/query_range",
             self.grafana_url, self.ds_id
         );
-        debug!("loki query_range: query={query} start={start_ns} end={end_ns}");
+        debug!("loki query_range: query={query} start={start_ns} end={end_ns} direction={direction}");
 
         let resp = self
             .http
@@ -61,7 +62,7 @@ impl LokiClient {
                 ("start", &start_ns.to_string()),
                 ("end", &end_ns.to_string()),
                 ("limit", &limit.to_string()),
-                ("direction", "backward"),
+                ("direction", direction),
             ])
             .send()
             .await?;
@@ -94,6 +95,7 @@ impl LokiClient {
                     .into_iter()
                     .map(|(ts_ns, line)| LokiEntry {
                         timestamp: format_nano_timestamp(&ts_ns),
+                        timestamp_ns: ts_ns,
                         line,
                     })
                     .collect();

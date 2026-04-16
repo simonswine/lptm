@@ -201,6 +201,11 @@ pub enum Event {
     LokiQueryCursorRight,
     LokiExecuteQuery,
     LokiResultLoaded(Result<Vec<LokiStream>, String>),
+    LokiSelectNextRow,
+    LokiSelectPrevRow,
+    LokiOpenContext,
+    LokiCloseContext,
+    LokiContextLoaded(Result<(Vec<crate::loki::LokiEntry>, usize), String>),
     BackFromLoki,
 }
 
@@ -332,6 +337,14 @@ pub struct Model {
     pub loki_loading: bool,
     pub loki_error: Option<String>,
     pub loki_results: Vec<LokiStream>,
+    pub loki_selected_row: usize,
+    pub loki_query_dirty: bool,
+    pub loki_context_open: bool,
+    pub loki_context_loading: bool,
+    pub loki_context_error: Option<String>,
+    pub loki_context_entries: Vec<crate::loki::LokiEntry>,
+    pub loki_context_highlight_index: usize,
+    pub loki_context_labels: String,
 }
 
 // ── ViewModel types ───────────────────────────────────────────────────────────
@@ -470,6 +483,14 @@ pub struct ViewModel {
     pub loki_loading: bool,
     pub loki_error: Option<String>,
     pub loki_results: Vec<LokiStream>,
+    pub loki_selected_row: usize,
+    pub loki_query_dirty: bool,
+    pub loki_context_open: bool,
+    pub loki_context_loading: bool,
+    pub loki_context_error: Option<String>,
+    pub loki_context_entries: Vec<crate::loki::LokiEntry>,
+    pub loki_context_highlight_index: usize,
+    pub loki_context_labels: String,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -879,6 +900,13 @@ impl App for ExploreTui {
             Event::LokiResultLoaded(result) => {
                 crate::loki::app::handle_loki_result_loaded(model, result)
             }
+            Event::LokiSelectNextRow => crate::loki::app::handle_loki_select_next_row(model),
+            Event::LokiSelectPrevRow => crate::loki::app::handle_loki_select_prev_row(model),
+            Event::LokiOpenContext => crate::loki::app::handle_loki_open_context(model),
+            Event::LokiCloseContext => crate::loki::app::handle_loki_close_context(model),
+            Event::LokiContextLoaded(result) => {
+                crate::loki::app::handle_loki_context_loaded(model, result)
+            }
             Event::BackFromLoki => crate::loki::app::handle_back_from_loki(model),
 
             Event::SelectDatasource { uid, name } => {
@@ -1103,6 +1131,14 @@ impl App for ExploreTui {
             loki_loading: model.loki_loading,
             loki_error: model.loki_error.clone(),
             loki_results: model.loki_results.clone(),
+            loki_selected_row: model.loki_selected_row,
+            loki_query_dirty: model.loki_query_dirty,
+            loki_context_open: model.loki_context_open,
+            loki_context_loading: model.loki_context_loading,
+            loki_context_error: model.loki_context_error.clone(),
+            loki_context_entries: model.loki_context_entries.clone(),
+            loki_context_highlight_index: model.loki_context_highlight_index,
+            loki_context_labels: model.loki_context_labels.clone(),
         }
     }
 }

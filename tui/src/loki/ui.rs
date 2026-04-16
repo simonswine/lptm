@@ -2,12 +2,17 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
     Frame,
 };
 use shared::ViewModel;
 
 pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+    if vm.loki_context_open {
+        render_context_view(frame, vm, area);
+        return;
+    }
+
     let split = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
 
     // ── Query input ───────────────────────────────────────────────────────────
@@ -86,6 +91,82 @@ pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         Constraint::Fill(1),
     ];
 
-    let table = Table::new(rows, widths).header(header).block(results_block);
-    frame.render_widget(table, split[1]);
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(results_block)
+        .highlight_symbol(">> ")
+        .row_highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut table_state = TableState::default();
+    table_state.select(Some(vm.loki_selected_row));
+    frame.render_stateful_widget(table, split[1], &mut table_state);
+}
+
+fn render_context_view(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+    let title = format!(" Context: {} ", vm.loki_context_labels);
+    let block = Block::default().borders(Borders::ALL).title(title);
+
+    if vm.loki_context_loading {
+        frame.render_widget(
+            Paragraph::new("Loading context…").block(block),
+            area,
+        );
+        return;
+    }
+
+    if let Some(ref err) = vm.loki_context_error {
+        frame.render_widget(
+            Paragraph::new(format!("Error: {err}"))
+                .style(Style::default().fg(Color::Red))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    if vm.loki_context_entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No context lines found.")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let header = Row::new(["Timestamp", "Log Line"].iter().map(|h| {
+        Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    }));
+
+    let rows: Vec<Row> = vm
+        .loki_context_entries
+        .iter()
+        .map(|entry| {
+            Row::new(vec![
+                Cell::from(entry.timestamp.clone()),
+                Cell::from(entry.line.clone()),
+            ])
+        })
+        .collect();
+
+    let widths = [Constraint::Length(24), Constraint::Fill(1)];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block)
+        .highlight_symbol(">> ")
+        .row_highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut table_state = TableState::default();
+    table_state.select(Some(vm.loki_context_highlight_index));
+    frame.render_stateful_widget(table, area, &mut table_state);
 }

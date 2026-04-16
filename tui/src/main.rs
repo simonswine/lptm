@@ -221,6 +221,7 @@ enum TempoMsg {
 
 enum LokiMsg {
     Result(Result<Vec<shared::loki::LokiStream>, String>),
+    ContextResult(Result<(Vec<shared::loki::LokiEntry>, usize), String>),
 }
 
 enum PyroscopeMsg {
@@ -311,6 +312,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                 match msg {
                     LokiMsg::Result(result) => {
                         app_core.update(Event::LokiResultLoaded(result));
+                    }
+                    LokiMsg::ContextResult(result) => {
+                        app_core.update(Event::LokiContextLoaded(result));
                     }
                 }
             }
@@ -1144,65 +1148,136 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                 }
                             }
                             ScreenView::LokiMode => {
-                                match (key.code, key.modifiers) {
-                                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
-                                    (KeyCode::Esc, _) => {
-                                        app_core.update(Event::BackFromLoki);
-                                    }
-                                    (KeyCode::Enter, _) => {
-                                        let vm2 = app_core.core.view();
-                                        if !vm2.loki_query.trim().is_empty() {
-                                            let ds_id = vm2
-                                                .datasources
-                                                .get(vm2.selected_index)
-                                                .map(|d| d.id);
-                                            let query = vm2.loki_query.clone();
+                                let vm2 = app_core.core.view();
+                                let context_open = vm2.loki_context_open;
+                                drop(vm2);
 
-                                            // Record history
-                                            if let Some(ds) = vm2.datasources.get(vm2.selected_index) {
-                                                let is_dup = all_history
-                                                    .last()
-                                                    .map(|e| e.query == query && e.datasource_uid == ds.uid)
-                                                    .unwrap_or(false);
-                                                if !is_dup {
-                                                    let entry = HistoryEntry {
-                                                        query: query.clone(),
-                                                        datasource_name: ds.name.clone(),
-                                                        datasource_uid: ds.uid.clone(),
-                                                        datasource_type: ds.ds_type.clone(),
-                                                        grafana_url_hash: url_hash.clone(),
-                                                        timestamp: now_unix_secs(),
-                                                        service_name: None,
-                                                        profile_type: None,
-                                                        time_range: None,
-                                                    };
-                                                    append_history(&entry);
-                                                    all_history.push(entry);
-                                                    app_core.update(Event::HistoryEntriesLoaded(
-                                                        history_views(&all_history, &url_hash),
-                                                    ));
+                                if context_open {
+                                    // Context view key bindings
+                                    match (key.code, key.modifiers) {
+                                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                                        (KeyCode::Esc, _) => {
+                                            app_core.update(Event::LokiCloseContext);
+                                        }
+                                        _ => {}
+                                    }
+                                } else {
+                                    // Normal query + results view
+                                    match (key.code, key.modifiers) {
+                                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                                        (KeyCode::Esc, _) => {
+                                            app_core.update(Event::BackFromLoki);
+                                        }
+                                        (KeyCode::Down, _) => {
+                                            app_core.update(Event::LokiSelectNextRow);
+                                        }
+                                        (KeyCode::Up, _) => {
+                                            app_core.update(Event::LokiSelectPrevRow);
+                                        }
+                                        (KeyCode::Enter, _) => {
+                                            let vm2 = app_core.core.view();
+                                            let has_results = !vm2.loki_results.is_empty();
+                                            let query_dirty = vm2.loki_query_dirty;
+                                            let query_empty = vm2.loki_query.trim().is_empty();
+                                            drop(vm2);
+
+                                            if has_results && !query_dirty {
+                                                // Open context for selected row
+                                                let vm2 = app_core.core.view();
+                                                let selected_row = vm2.loki_selected_row;
+                                                // Find the selected entry's timestamp_ns and labels
+                                                let mut entry_info = None;
+                                                let mut flat_idx = 0;
+                                                for stream in &vm2.loki_results {
+                                                    for entry in &stream.entries {
+                                                        if flat_idx == selected_row {
+                                                            entry_info = Some((
+                                                                stream.labels.clone(),
+                                                                entry.timestamp_ns.clone(),
+                                                            ));
+                                                            break;
+                                                        }
+                                                        flat_idx += 1;
+                                                    }
+                                                    if entry_info.is_some() {
+                                                        break;
+                                                    }
+                                                }
+                                                let ds_id = vm2
+                                                    .datasources
+                                                    .get(vm2.selected_index)
+                                                    .map(|d| d.id);
+                                                drop(vm2);
+
+                                                if let (Some((labels, ts_ns)), Some(ds_id)) =
+                                                    (entry_info, ds_id)
+                                                {
+                                                    app_core.update(Event::LokiOpenContext);
+                                                    spawn_loki_context_query(
+                                                        &loki_tx,
+                                                        grafana_url.clone(),
+                                                        ds_id,
+                                                        grafana_token.clone(),
+                                                        labels,
+                                                        ts_ns,
+                                                    );
+                                                }
+                                            } else if !query_empty {
+                                                // Execute query
+                                                let vm2 = app_core.core.view();
+                                                let ds_id = vm2
+                                                    .datasources
+                                                    .get(vm2.selected_index)
+                                                    .map(|d| d.id);
+                                                let query = vm2.loki_query.clone();
+
+                                                // Record history
+                                                if let Some(ds) = vm2.datasources.get(vm2.selected_index) {
+                                                    let is_dup = all_history
+                                                        .last()
+                                                        .map(|e| e.query == query && e.datasource_uid == ds.uid)
+                                                        .unwrap_or(false);
+                                                    if !is_dup {
+                                                        let entry = HistoryEntry {
+                                                            query: query.clone(),
+                                                            datasource_name: ds.name.clone(),
+                                                            datasource_uid: ds.uid.clone(),
+                                                            datasource_type: ds.ds_type.clone(),
+                                                            grafana_url_hash: url_hash.clone(),
+                                                            timestamp: now_unix_secs(),
+                                                            service_name: None,
+                                                            profile_type: None,
+                                                            time_range: None,
+                                                        };
+                                                        append_history(&entry);
+                                                        all_history.push(entry);
+                                                        app_core.update(Event::HistoryEntriesLoaded(
+                                                            history_views(&all_history, &url_hash),
+                                                        ));
+                                                    }
+                                                }
+                                                drop(vm2);
+
+                                                app_core.update(Event::LokiExecuteQuery);
+                                                if let Some(ds_id) = ds_id {
+                                                    spawn_loki_query(&loki_tx, grafana_url.clone(), ds_id, grafana_token.clone(), query);
                                                 }
                                             }
-
-                                            app_core.update(Event::LokiExecuteQuery);
-                                            if let Some(ds_id) = ds_id {
-                                                spawn_loki_query(&loki_tx, grafana_url.clone(), ds_id, grafana_token.clone(), query);
-                                            }
                                         }
+                                        (KeyCode::Backspace, _) => {
+                                            app_core.update(Event::LokiQueryBackspace);
+                                        }
+                                        (KeyCode::Left, _) => {
+                                            app_core.update(Event::LokiQueryCursorLeft);
+                                        }
+                                        (KeyCode::Right, _) => {
+                                            app_core.update(Event::LokiQueryCursorRight);
+                                        }
+                                        (KeyCode::Char(c), _) => {
+                                            app_core.update(Event::LokiQueryInput(c));
+                                        }
+                                        _ => {}
                                     }
-                                    (KeyCode::Backspace, _) => {
-                                        app_core.update(Event::LokiQueryBackspace);
-                                    }
-                                    (KeyCode::Left, _) => {
-                                        app_core.update(Event::LokiQueryCursorLeft);
-                                    }
-                                    (KeyCode::Right, _) => {
-                                        app_core.update(Event::LokiQueryCursorRight);
-                                    }
-                                    (KeyCode::Char(c), _) => {
-                                        app_core.update(Event::LokiQueryInput(c));
-                                    }
-                                    _ => {}
                                 }
                             }
                         }
@@ -1274,7 +1349,13 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
             "Ctrl+C: Quit  Esc: Back  Enter: Execute  ←/→: Cursor"
         }
         ScreenView::LokiMode => {
-            "Ctrl+C: Quit  Esc: Back  Enter: Execute  ←/→: Cursor"
+            if vm.loki_context_open {
+                "Ctrl+C: Quit  Esc: Back to results"
+            } else if !vm.loki_results.is_empty() && !vm.loki_query_dirty {
+                "Ctrl+C: Quit  Esc: Back  ↑/↓: Navigate  Enter: Context  Type to edit query"
+            } else {
+                "Ctrl+C: Quit  Esc: Back  Enter: Execute  ←/→: Cursor  ↑/↓: Navigate"
+            }
         }
         ScreenView::PyroscopeMode => match vm.pyroscope_sub_screen {
             PyroscopeSubScreenView::ServiceList if vm.pyroscope_profile_type_dropdown_open => {
@@ -1776,9 +1857,78 @@ fn spawn_loki_query(
         let start_ns = now_ns.saturating_sub(3600 * 1_000_000_000); // last 1 hour
         let client = loki::LokiClient::new(grafana_url, ds_id, token);
         let result = client
-            .query_range(&query, start_ns, now_ns, 1000)
+            .query_range(&query, start_ns, now_ns, 1000, "backward")
             .await
             .map_err(|e| e.to_string());
         let _ = tx.send(LokiMsg::Result(result));
+    });
+}
+
+fn spawn_loki_context_query(
+    tx: &mpsc::UnboundedSender<LokiMsg>,
+    grafana_url: String,
+    ds_id: u64,
+    token: String,
+    labels: String,
+    timestamp_ns: String,
+) {
+    let tx = tx.clone();
+    let context_lines: u32 = 50;
+    tokio::spawn(async move {
+        let ts: u64 = timestamp_ns.parse().unwrap_or(0);
+        let client = loki::LokiClient::new(grafana_url, ds_id, token);
+
+        // Query lines BEFORE (inclusive of selected): end=ts, direction=backward
+        let before_result = client
+            .query_range(&labels, 0, ts, context_lines, "backward")
+            .await;
+
+        // Query lines AFTER (inclusive of selected): start=ts, direction=forward
+        let far_future = ts.saturating_add(3600 * 1_000_000_000);
+        let after_result = client
+            .query_range(&labels, ts, far_future, context_lines + 1, "forward")
+            .await;
+
+        let result = match (before_result, after_result) {
+            (Ok(before_streams), Ok(after_streams)) => {
+                // Flatten and collect entries from the before query (newest-first → reverse to oldest-first)
+                let mut before_entries: Vec<shared::loki::LokiEntry> = before_streams
+                    .into_iter()
+                    .flat_map(|s| s.entries)
+                    .collect();
+                before_entries.reverse();
+
+                // Flatten after entries (already oldest-first in forward mode)
+                let after_entries: Vec<shared::loki::LokiEntry> = after_streams
+                    .into_iter()
+                    .flat_map(|s| s.entries)
+                    .collect();
+
+                // The selected line appears in both results (at ts boundary).
+                // before_entries ends with the selected line, after_entries starts with it.
+                // Deduplicate: skip the first entry from after if it matches the last from before.
+                let highlight_index = before_entries.len().saturating_sub(1);
+                let mut merged = before_entries;
+
+                let skip = if !merged.is_empty() && !after_entries.is_empty() {
+                    let last = &merged[merged.len() - 1];
+                    let first = &after_entries[0];
+                    last.timestamp_ns == first.timestamp_ns && last.line == first.line
+                } else {
+                    false
+                };
+
+                if skip {
+                    merged.extend(after_entries.into_iter().skip(1));
+                } else {
+                    merged.extend(after_entries);
+                }
+
+                Ok((merged, highlight_index))
+            }
+            (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
+        };
+
+        let _ = tx.send(LokiMsg::ContextResult(result));
     });
 }
