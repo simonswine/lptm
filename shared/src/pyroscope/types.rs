@@ -1,4 +1,3 @@
-use log::debug;
 use serde::{Deserialize, Serialize};
 
 
@@ -848,34 +847,6 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
     // x_min = timestamp_ms - step_ms, x_max = timestamp_ms.
     let start_ms = slots.first().map(|s| s.timestamp_ms).unwrap_or(0) - step_ms;
     let end_ms = slots.last().map(|s| s.timestamp_ms).unwrap_or(0);
-
-    // Log bucket boundaries once (from first slot with buckets).
-    if let Some(ref_slot) = slots.iter().find(|s| !s.y_min.is_empty()) {
-        debug!(
-            "build_heatmap_view: n_slots={} step_ms={} start_ms={} end_ms={} n_buckets={} y_min={:?} y_max={}",
-            slots.len(), step_ms, start_ms, end_ms, n_buckets, ref_slot.y_min, y_max,
-        );
-    }
-    for (i, slot) in slots.iter().enumerate() {
-        if !slot.exemplars.is_empty() {
-            debug!(
-                "  slot[{}] timestamp_ms={} (x_min={} x_max={}) exemplars:",
-                i, slot.timestamp_ms, slot.timestamp_ms - step_ms, slot.timestamp_ms,
-            );
-            for e in &slot.exemplars {
-                let offset_ms = e.timestamp_ms - (slot.timestamp_ms - step_ms);
-                // Find which raw bucket the exemplar value falls into.
-                let bucket = slot.y_min.partition_point(|&b| b <= e.value as f64).saturating_sub(1);
-                debug!(
-                    "    exemplar ts={} offset_from_x_min={}ms value={} -> raw_bucket={} y_min[b]={:?} y_min[b+1]={:?}",
-                    e.timestamp_ms, offset_ms, e.value,
-                    bucket,
-                    slot.y_min.get(bucket),
-                    slot.y_min.get(bucket + 1),
-                );
-            }
-        }
-    }
 
     // Collect bucket lower bounds from the first slot that has them.
     let bucket_bounds: Vec<f64> = slots

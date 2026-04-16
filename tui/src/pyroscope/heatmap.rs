@@ -1,4 +1,3 @@
-use log::debug;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
@@ -38,23 +37,6 @@ impl HeatmapPopup {
     ) -> Option<Self> {
         let (slot_idx, bucket_idx) = layout.cell_to_slot_bucket(screen_x, screen_y, hm)?;
         let slot = slots.get(slot_idx)?;
-
-        debug!(
-            "heatmap click: screen=({},{}) slot_idx={} bucket_idx={} n_slots={} n_buckets={}",
-            screen_x, screen_y, slot_idx, bucket_idx, slots.len(), hm.n_buckets,
-        );
-        for (i, s) in slots.iter().enumerate() {
-            debug!(
-                "  slot[{}] ts={} counts={:?} y_min={:?}",
-                i, s.timestamp_ms, s.counts, s.y_min
-            );
-            for (j, e) in s.exemplars.iter().enumerate() {
-                debug!(
-                    "    exemplar[{}] ts={} value={} profile_id={} span_id={} labels={:?}",
-                    j, e.timestamp_ms, e.value, e.profile_id, e.span_id, e.labels
-                );
-            }
-        }
 
         let count = *slot.counts.get(bucket_idx)?;
         let bucket_y_min = slot.y_min.get(bucket_idx).copied()?;
