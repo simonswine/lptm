@@ -215,6 +215,30 @@ impl PyroscopeClient {
         start: i64,
         end: i64,
     ) -> Result<Option<FlameGraph>> {
+        self.select_merge_stacktraces_inner(profile_type_id, service, start, end, None).await
+    }
+
+    pub async fn select_merge_stacktraces_by_profile_id(
+        &self,
+        profile_type_id: &str,
+        service: &str,
+        start: i64,
+        end: i64,
+        profile_id: &str,
+    ) -> Result<Option<FlameGraph>> {
+        self.select_merge_stacktraces_inner(
+            profile_type_id, service, start, end, Some(profile_id),
+        ).await
+    }
+
+    async fn select_merge_stacktraces_inner(
+        &self,
+        profile_type_id: &str,
+        service: &str,
+        start: i64,
+        end: i64,
+        profile_id: Option<&str>,
+    ) -> Result<Option<FlameGraph>> {
         let req = SelectMergeStacktracesRequest {
             profile_typeID: profile_type_id.into(),
             label_selector: format!("{{service_name=\"{service}\"}}"),
@@ -222,6 +246,7 @@ impl PyroscopeClient {
             end,
             max_nodes: None,
             format: ProfileFormat::PROFILE_FORMAT_FLAMEGRAPH.into(),
+            profile_id_selector: profile_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
             ..SelectMergeStacktracesRequest::default()
         };
         let resp: SelectMergeStacktracesResponse =
