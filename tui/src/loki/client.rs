@@ -109,7 +109,7 @@ impl LokiClient {
 
 fn format_labels(labels: &std::collections::HashMap<String, String>) -> String {
     let mut pairs: Vec<_> = labels.iter().collect();
-    pairs.sort_by_key(|(k, _)| k.clone());
+    pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
     let inner: Vec<String> = pairs
         .iter()
         .map(|(k, v)| format!("{k}={v:?}"))

@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame,
 };
 use shared::ViewModel;
@@ -104,6 +104,50 @@ pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     let mut table_state = TableState::default();
     table_state.select(Some(vm.loki_selected_row));
     frame.render_stateful_widget(table, split[1], &mut table_state);
+
+    render_completion_popup(frame, vm, split[1]);
+}
+
+fn render_completion_popup(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+    let has_completions = !vm.loki_completions.is_empty();
+    let show_loading = vm.loki_completions_loading && !has_completions;
+
+    if !has_completions && !show_loading {
+        return;
+    }
+
+    if show_loading {
+        let popup_w = 20u16.min(area.width);
+        let popup_h = 3u16.min(area.height);
+        let popup_area = Rect::new(area.x, area.y, popup_w, popup_h);
+        frame.render_widget(Clear, popup_area);
+        let loading = Paragraph::new("Loading\u{2026}")
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(loading, popup_area);
+        return;
+    }
+
+    let max_len = vm.loki_completions.iter().map(|s| s.len()).max().unwrap_or(10);
+    let popup_w = ((max_len as u16) + 4).max(20).min(area.width);
+    let popup_h = ((vm.loki_completions.len() as u16) + 2).min(12).min(area.height);
+    let popup_area = Rect::new(area.x, area.y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let items: Vec<ListItem> = vm
+        .loki_completions
+        .iter()
+        .map(|c| ListItem::new(c.as_str().to_owned()))
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(vm.loki_completion_index);
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Completions "))
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White));
+
+    frame.render_stateful_widget(list, popup_area, &mut list_state);
 }
 
 fn render_context_view(frame: &mut Frame, vm: &ViewModel, area: Rect) {

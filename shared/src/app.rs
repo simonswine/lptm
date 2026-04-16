@@ -207,6 +207,22 @@ pub enum Event {
     LokiCloseContext,
     LokiContextLoaded(Result<(Vec<crate::loki::LokiEntry>, usize), String>),
     BackFromLoki,
+
+    // Loki completion
+    LokiTriggerCompletions,
+    LokiCompletionNext,
+    LokiCompletionPrev,
+    LokiCompletionAccept,
+    LokiCompletionDismiss,
+    LokiLabelNamesLoaded(
+        String,
+        crux_http::Result<crux_http::Response<PrometheusStringListResponse>>,
+    ),
+    LokiLabelValuesLoaded(
+        String,
+        String,
+        crux_http::Result<crux_http::Response<PrometheusStringListResponse>>,
+    ),
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -345,6 +361,15 @@ pub struct Model {
     pub loki_context_entries: Vec<crate::loki::LokiEntry>,
     pub loki_context_highlight_index: usize,
     pub loki_context_labels: String,
+
+    // Loki autocomplete caches
+    pub loki_label_names_cache: HashMap<String, Vec<String>>,
+    pub loki_label_values_cache: HashMap<(String, String), Vec<String>>,
+
+    // Loki autocomplete UI state
+    pub loki_completion_index: Option<usize>,
+    pub loki_completion_dismissed: bool,
+    pub loki_label_names_loading: bool,
 }
 
 // ── ViewModel types ───────────────────────────────────────────────────────────
@@ -491,6 +516,10 @@ pub struct ViewModel {
     pub loki_context_entries: Vec<crate::loki::LokiEntry>,
     pub loki_context_highlight_index: usize,
     pub loki_context_labels: String,
+
+    pub loki_completions: Vec<String>,
+    pub loki_completion_index: Option<usize>,
+    pub loki_completions_loading: bool,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -909,6 +938,23 @@ impl App for ExploreTui {
             }
             Event::BackFromLoki => crate::loki::app::handle_back_from_loki(model),
 
+            // ── Loki completion ──────────────────────────────────────────
+            Event::LokiTriggerCompletions => {
+                crate::loki::app::handle_loki_trigger_completions(model)
+            }
+            Event::LokiCompletionNext => crate::loki::app::handle_loki_completion_next(model),
+            Event::LokiCompletionPrev => crate::loki::app::handle_loki_completion_prev(model),
+            Event::LokiCompletionAccept => crate::loki::app::handle_loki_completion_accept(model),
+            Event::LokiCompletionDismiss => {
+                crate::loki::app::handle_loki_completion_dismiss(model)
+            }
+            Event::LokiLabelNamesLoaded(sel, resp) => {
+                crate::loki::app::handle_loki_label_names_loaded(model, sel, resp)
+            }
+            Event::LokiLabelValuesLoaded(lbl, sel, resp) => {
+                crate::loki::app::handle_loki_label_values_loaded(model, lbl, sel, resp)
+            }
+
             Event::SelectDatasource { uid, name } => {
                 model.datasource_filter.clear();
                 model.datasource_filter_focused = false;
@@ -1139,6 +1185,9 @@ impl App for ExploreTui {
             loki_context_entries: model.loki_context_entries.clone(),
             loki_context_highlight_index: model.loki_context_highlight_index,
             loki_context_labels: model.loki_context_labels.clone(),
+            loki_completions: crate::loki::app::get_loki_completions(model),
+            loki_completion_index: model.loki_completion_index,
+            loki_completions_loading: model.loki_label_names_loading,
         }
     }
 }

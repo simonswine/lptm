@@ -177,7 +177,7 @@ pub fn char_to_byte(s: &str, char_pos: usize) -> usize {
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 /// True if the cursor sits inside an unmatched `[…]` (range vector or subquery).
-fn in_bracket_context(before: &str) -> bool {
+pub(crate) fn in_bracket_context(before: &str) -> bool {
     let bytes = before.as_bytes();
     let mut depth: i32 = 0;
     let mut in_string = false;
@@ -255,7 +255,7 @@ fn in_label_list_paren(before: &str) -> bool {
 
 /// Find label value completion context: returns `(label_name, value_prefix)` if
 /// the cursor is inside an unclosed quoted string that is part of a label matcher.
-fn find_label_value_context(before: &str) -> Option<(String, String)> {
+pub(crate) fn find_label_value_context(before: &str) -> Option<(String, String)> {
     let bytes = before.as_bytes();
     let len = bytes.len();
     let mut in_string = false;
@@ -312,7 +312,7 @@ fn find_label_value_context(before: &str) -> Option<(String, String)> {
 }
 
 /// Count the net open-brace depth of `s`, respecting string literals.
-fn count_brace_depth(s: &str) -> i32 {
+pub(crate) fn count_brace_depth(s: &str) -> i32 {
     let bytes = s.as_bytes();
     let mut depth: i32 = 0;
     let mut in_string = false;

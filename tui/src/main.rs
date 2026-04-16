@@ -325,7 +325,15 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                 }
             } => {
                 debounce_deadline = None;
-                app_core.update(Event::TriggerCompletions);
+                let vm = app_core.core.view();
+                match vm.screen {
+                    ScreenView::LokiMode => {
+                        app_core.update(Event::LokiTriggerCompletions);
+                    }
+                    _ => {
+                        app_core.update(Event::TriggerCompletions);
+                    }
+                }
             }
             maybe_event = reader.next() => {
                 let Some(Ok(event)) = maybe_event else { break };
@@ -1150,6 +1158,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                             ScreenView::LokiMode => {
                                 let vm2 = app_core.core.view();
                                 let context_open = vm2.loki_context_open;
+                                let has_completions = !vm2.loki_completions.is_empty();
                                 drop(vm2);
 
                                 if context_open {
@@ -1166,7 +1175,20 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     match (key.code, key.modifiers) {
                                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
                                         (KeyCode::Esc, _) => {
-                                            app_core.update(Event::BackFromLoki);
+                                            if has_completions {
+                                                app_core.update(Event::LokiCompletionDismiss);
+                                            } else {
+                                                app_core.update(Event::BackFromLoki);
+                                            }
+                                        }
+                                        (KeyCode::Tab, _) => {
+                                            app_core.update(Event::LokiCompletionAccept);
+                                        }
+                                        (KeyCode::Down, _) if has_completions => {
+                                            app_core.update(Event::LokiCompletionNext);
+                                        }
+                                        (KeyCode::Up, _) if has_completions => {
+                                            app_core.update(Event::LokiCompletionPrev);
                                         }
                                         (KeyCode::Down, _) => {
                                             app_core.update(Event::LokiSelectNextRow);
@@ -1266,6 +1288,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         }
                                         (KeyCode::Backspace, _) => {
                                             app_core.update(Event::LokiQueryBackspace);
+                                            debounce_deadline = Some(Instant::now() + DEBOUNCE);
                                         }
                                         (KeyCode::Left, _) => {
                                             app_core.update(Event::LokiQueryCursorLeft);
@@ -1275,6 +1298,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         }
                                         (KeyCode::Char(c), _) => {
                                             app_core.update(Event::LokiQueryInput(c));
+                                            debounce_deadline = Some(Instant::now() + DEBOUNCE);
                                         }
                                         _ => {}
                                     }
@@ -1351,10 +1375,12 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
         ScreenView::LokiMode => {
             if vm.loki_context_open {
                 "Ctrl+C: Quit  Esc: Back to results"
+            } else if !vm.loki_completions.is_empty() {
+                "Ctrl+C: Quit  Esc: Dismiss  Tab: Accept  ↑/↓: Select  Enter: Execute"
             } else if !vm.loki_results.is_empty() && !vm.loki_query_dirty {
-                "Ctrl+C: Quit  Esc: Back  ↑/↓: Navigate  Enter: Context  Type to edit query"
+                "Ctrl+C: Quit  Esc: Back  ↑/↓: Navigate  Enter: Context  Tab: Complete"
             } else {
-                "Ctrl+C: Quit  Esc: Back  Enter: Execute  ←/→: Cursor  ↑/↓: Navigate"
+                "Ctrl+C: Quit  Esc: Back  Enter: Execute  Tab: Complete  ←/→: Cursor  ↑/↓: Navigate"
             }
         }
         ScreenView::PyroscopeMode => match vm.pyroscope_sub_screen {
