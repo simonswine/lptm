@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, EventStream, KeyCode,
-    KeyModifiers, MouseButton, MouseEventKind,
+    KeyModifiers,
 };
 use crossterm::execute;
 use futures::StreamExt;
@@ -213,6 +213,9 @@ async fn main() -> Result<()> {
 
 enum TempoMsg {
     Result(Result<Vec<shared::TempoTrace>, String>),
+    SpanTraceResult { span_id: String, trace_id: Option<String> },
+    SpanTraceBatch(std::collections::HashMap<String, String>),
+    SpanTraceLoadingDone,
 }
 
 enum PyroscopeMsg {
@@ -252,22 +255,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
     let (pyroscope_tx, mut pyroscope_rx) = mpsc::unbounded_channel::<PyroscopeMsg>();
     let (tempo_tx, mut tempo_rx) = mpsc::unbounded_channel::<TempoMsg>();
 
-    // Heatmap mouse state: last rendered layout + raw slots for popup construction.
-    let mut heatmap_layout: Option<pyroscope::heatmap::HeatmapLayout> = None;
-    let mut heatmap_slots: Vec<shared::pyroscope::HeatmapSlot> = Vec::new();
-    let mut span_heatmap_slots: Vec<shared::pyroscope::HeatmapSlot> = Vec::new();
-    let mut heatmap_popup: Option<pyroscope::heatmap::HeatmapPopup> = None;
-
-    // Helper: draw the UI, capturing the heatmap layout returned by the render.
     macro_rules! draw {
-        ($term:expr, $vm:expr, $popup:expr) => {{
-            let mut captured_layout: Option<pyroscope::heatmap::HeatmapLayout> = None;
-            $term.draw(|frame| {
-                captured_layout = ui(frame, $vm, $popup);
-            })?;
-            if captured_layout.is_some() {
-                heatmap_layout = captured_layout;
-            }
+        ($term:expr, $vm:expr) => {{
+            $term.draw(|frame| { ui(frame, $vm); })?;
         }};
     }
 
@@ -285,15 +275,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                         app_core.update(Event::PyroscopeTimelineLoaded(result));
                     }
                     PyroscopeMsg::Heatmap(result) => {
-                        if let Ok(ref slots) = result {
-                            heatmap_slots = slots.clone();
-                        }
                         app_core.update(Event::PyroscopeHeatmapLoaded(result));
                     }
                     PyroscopeMsg::SpanHeatmap(result) => {
-                        if let Ok(ref slots) = result {
-                            span_heatmap_slots = slots.clone();
-                        }
                         app_core.update(Event::PyroscopeSpanHeatmapLoaded(result));
                     }
                 }
@@ -302,6 +286,18 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                 match msg {
                     TempoMsg::Result(result) => {
                         app_core.update(Event::TempoResultLoaded(result));
+                    }
+                    TempoMsg::SpanTraceResult { span_id, trace_id } => {
+                        app_core.update(Event::SpanHeatmapTempoResultLoaded {
+                            span_id,
+                            trace_id: trace_id.unwrap_or_default(),
+                        });
+                    }
+                    TempoMsg::SpanTraceBatch(map) => {
+                        app_core.update(Event::SpanHeatmapTempoBatchLoaded(map));
+                    }
+                    TempoMsg::SpanTraceLoadingDone => {
+                        app_core.update(Event::SpanHeatmapTempoLoadingDone);
                     }
                 }
             }
@@ -820,6 +816,133 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     | PyroscopeSubScreenView::Timeline
                                     | PyroscopeSubScreenView::ProfileHeatmap
                                     | PyroscopeSubScreenView::SpanHeatmap => {
+                                        // Tempo datasource picker intercepts all keys when open.
+                                        if vm.tempo_datasource_picker_open {
+                                            match key.code {
+                                                KeyCode::Esc => {
+                                                    app_core.update(Event::SpanHeatmapCloseTempoPicker);
+                                                }
+                                                KeyCode::Char('j') | KeyCode::Down => {
+                                                    app_core.update(Event::SpanHeatmapTempoPickerNext);
+                                                }
+                                                KeyCode::Char('k') | KeyCode::Up => {
+                                                    app_core.update(Event::SpanHeatmapTempoPickerPrev);
+                                                }
+                                                KeyCode::Enter => {
+                                                    let vm2 = app_core.core.view();
+                                                    if let Some(ds) = vm2.tempo_datasources.get(vm2.tempo_picker_index).cloned() {
+                                                        if let Some(hm) = vm2.span_heatmap.as_ref() {
+                                                            let mut span_ids: Vec<String> = hm.exemplars.iter()
+                                                                .map(|e| e.span_id.clone())
+                                                                .filter(|s| !s.is_empty())
+                                                                .collect();
+                                                            span_ids.sort_unstable();
+                                                            span_ids.dedup();
+                                                            if !span_ids.is_empty() {
+                                                                let query = format!(
+                                                                    "{{{}}}",
+                                                                    span_ids.iter()
+                                                                        .map(|id| format!("span:id = \"{id}\""))
+                                                                        .collect::<Vec<_>>()
+                                                                        .join(" || ")
+                                                                );
+                                                                info!("tempo span lookup: {query}");
+                                                                app_core.update(Event::SpanHeatmapClearResults);
+                                                                app_core.update(Event::SpanHeatmapTempoLoadingStarted);
+                                                                spawn_span_traces_fetch(
+                                                                    &tempo_tx,
+                                                                    grafana_url.clone(),
+                                                                    ds.uid.clone(),
+                                                                    grafana_token.clone(),
+                                                                    span_ids,
+                                                                    hm.start_ms,
+                                                                    hm.end_ms,
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                    app_core.update(Event::SpanHeatmapCloseTempoPicker);
+                                                }
+                                                _ => {}
+                                            }
+                                        } else if vm.pyroscope_sub_screen == PyroscopeSubScreenView::SpanHeatmap
+                                            && vm.exemplar_detail_open
+                                        {
+                                            match (key.code, key.modifiers) {
+                                                (KeyCode::Esc, _) | (KeyCode::Enter, _) => {
+                                                    app_core.update(Event::ExemplarDetailClose);
+                                                }
+                                                (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+                                                    let vm2 = app_core.core.view();
+                                                    if let Some(exemplar) = vm2.span_heatmap.as_ref()
+                                                        .and_then(|h| h.exemplars.get(vm2.pyroscope_exemplar_index))
+                                                    {
+                                                        let trace_id = vm2.span_trace_lookup.get(&exemplar.span_id).cloned().unwrap_or_default();
+                                                        if !trace_id.is_empty() {
+                                                            if let Some(ds) = vm2.tempo_datasources.first().cloned() {
+                                                                app_core.update(Event::ExemplarDetailClose);
+                                                                app_core.update(Event::SelectDatasource { uid: ds.uid.clone(), name: ds.name.clone() });
+                                                                app_core.update(Event::EnterTempo);
+                                                                for c in trace_id.chars() {
+                                                                    app_core.update(Event::TempoQueryInput(c));
+                                                                }
+                                                                let vm3 = app_core.core.view();
+                                                                app_core.update(Event::TempoExecuteQuery);
+                                                                spawn_tempo_search(&tempo_tx, grafana_url.clone(), ds.uid, grafana_token.clone(), vm3.tempo_query.clone());
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                                                    let vm2 = app_core.core.view();
+                                                    if let Some(exemplar) = vm2.span_heatmap.as_ref()
+                                                        .and_then(|h| h.exemplars.get(vm2.pyroscope_exemplar_index))
+                                                    {
+                                                        if !exemplar.profile_id.is_empty() {
+                                                            let ds_id = vm2.datasources.get(vm2.selected_index).map(|d| d.id);
+                                                            let profile_id = exemplar.profile_id.clone();
+                                                            let profile_type = vm2.pyroscope_selected_profile_type.clone();
+                                                            let service = vm2.pyroscope_selected_service.clone();
+                                                            let time_range = vm2.pyroscope_time_range.clone();
+                                                            let now = now_unix_secs() as i64 * 1000;
+                                                            app_core.update(Event::ExemplarDetailClose);
+                                                            app_core.update(Event::PyroscopeDirectLoad {
+                                                                service_name: service.clone(),
+                                                                profile_type: profile_type.clone(),
+                                                            });
+                                                            if let Ok(size) = terminal.size() {
+                                                                app_core.update(Event::FlamegraphViewportChars(size.width.saturating_sub(2) as u64));
+                                                            }
+                                                            if let Some(ds_id) = ds_id {
+                                                                spawn_flamegraph_by_profile_id(
+                                                                    &pyroscope_tx,
+                                                                    grafana_url.clone(),
+                                                                    ds_id,
+                                                                    grafana_token.clone(),
+                                                                    profile_type,
+                                                                    service,
+                                                                    time_range,
+                                                                    now,
+                                                                    profile_id,
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        } else if vm.pyroscope_sub_screen == PyroscopeSubScreenView::SpanHeatmap
+                                            && key.code == KeyCode::Char('t')
+                                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                                        {
+                                            if !vm.tempo_datasources.is_empty() {
+                                                app_core.update(Event::SpanHeatmapOpenTempoPicker);
+                                            }
+                                        } else if vm.pyroscope_sub_screen == PyroscopeSubScreenView::SpanHeatmap
+                                            && key.code == KeyCode::Enter
+                                        {
+                                            app_core.update(Event::ExemplarDetailOpen);
+                                        } else {
                                         match (&vm.pyroscope_sub_screen, key.code) {
                                             // Back to service list
                                             (PyroscopeSubScreenView::Flamegraph, KeyCode::Esc) if vm.sandwich_view.is_some() => {
@@ -920,6 +1043,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                             }
                                             _ => {}
                                         }
+                                        } // close else { match }
                                     }
                                 }
                             }
@@ -990,81 +1114,38 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                     CrosstermEvent::Resize(w, _) => {
                         app_core.update(Event::FlamegraphViewportChars(w.saturating_sub(2) as u64));
                         let vm = app_core.core.view();
-                        draw!(terminal, &vm, &heatmap_popup);
-                        
-                    }
-                    CrosstermEvent::Mouse(me) => {
-                        if me.kind == MouseEventKind::Down(MouseButton::Left) {
-                            let vm = app_core.core.view();
-                            let is_heatmap = matches!(
-                                vm.pyroscope_sub_screen,
-                                PyroscopeSubScreenView::ProfileHeatmap | PyroscopeSubScreenView::SpanHeatmap
-                            );
-                            info!(
-                                "mouse left click at ({},{}) is_heatmap={} layout={} hm_slots={} span_slots={}",
-                                me.column, me.row, is_heatmap,
-                                heatmap_layout.is_some(),
-                                heatmap_slots.len(),
-                                span_heatmap_slots.len(),
-                            );
-                            if is_heatmap {
-                                if let Some(ref layout) = heatmap_layout {
-                                    let slots = if vm.pyroscope_sub_screen == PyroscopeSubScreenView::SpanHeatmap {
-                                        &span_heatmap_slots
-                                    } else {
-                                        &heatmap_slots
-                                    };
-                                    let hm_view = if vm.pyroscope_sub_screen == PyroscopeSubScreenView::SpanHeatmap {
-                                        vm.span_heatmap.as_ref()
-                                    } else {
-                                        vm.heatmap.as_ref()
-                                    };
-                                    info!(
-                                        "heatmap layout={:?} hm={} slots={}",
-                                        layout,
-                                        hm_view.is_some(),
-                                        slots.len(),
-                                    );
-                                    if let Some(hm) = hm_view {
-                                        let new_popup = pyroscope::heatmap::HeatmapPopup::from_click(
-                                            me.column, me.row, layout, hm, slots,
-                                        );
-                                        if new_popup.is_some() {
-                                            heatmap_popup = new_popup;
-                                        } else {
-                                            heatmap_popup = None;
-                                        }
-                                    }
-                                }
-                                let vm = app_core.core.view();
-                                draw!(terminal, &vm, &heatmap_popup);
-                            }
-                        } else if me.kind == MouseEventKind::Down(MouseButton::Right) {
-                            heatmap_popup = None;
-                            let vm = app_core.core.view();
-                            draw!(terminal, &vm, &heatmap_popup);
-                        }
+                        draw!(terminal, &vm);
                     }
                     _ => {}
                 }
             }
             Some(()) = render_rx.recv() => {
                 let vm = app_core.core.view();
-                draw!(terminal, &vm, &heatmap_popup);
+                draw!(terminal, &vm);
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                // Drive blinking exemplar marker: only redraw when relevant.
+            _ = {
                 let vm = app_core.core.view();
-                let needs_blink = matches!(
-                    vm.pyroscope_sub_screen,
-                    PyroscopeSubScreenView::Timeline
-                    | PyroscopeSubScreenView::ProfileHeatmap
-                    | PyroscopeSubScreenView::SpanHeatmap
-                ) && (vm.timeline.as_ref().map_or(false, |t| !t.exemplars.is_empty())
-                    || vm.heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty())
-                    || vm.span_heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty()));
-                if needs_blink {
-                    draw!(terminal, &vm, &heatmap_popup);
+                let needs_fast = vm.span_trace_loading
+                    || vm.pyroscope_span_heatmap_loading
+                    || vm.pyroscope_heatmap_loading
+                    || vm.pyroscope_timeline_loading
+                    || vm.pyroscope_flamegraph_loading;
+                let ms = if needs_fast { 100 } else { 500 };
+                tokio::time::sleep(std::time::Duration::from_millis(ms))
+            } => {
+                // Drive spinner animation and blinking exemplar marker.
+                let vm = app_core.core.view();
+                let needs_redraw = vm.span_trace_loading
+                    || matches!(
+                        vm.pyroscope_sub_screen,
+                        PyroscopeSubScreenView::Timeline
+                        | PyroscopeSubScreenView::ProfileHeatmap
+                        | PyroscopeSubScreenView::SpanHeatmap
+                    ) && (vm.timeline.as_ref().map_or(false, |t| !t.exemplars.is_empty())
+                        || vm.heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty())
+                        || vm.span_heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty()));
+                if needs_redraw {
+                    draw!(terminal, &vm);
                 }
             }
         }
@@ -1081,11 +1162,7 @@ fn blink_on() -> bool {
         < 500
 }
 
-fn ui(
-    frame: &mut Frame,
-    vm: &ViewModel,
-    popup: &Option<pyroscope::heatmap::HeatmapPopup>,
-) -> Option<pyroscope::heatmap::HeatmapLayout> {
+fn ui(frame: &mut Frame, vm: &ViewModel) {
     let area = frame.area();
 
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
@@ -1116,10 +1193,17 @@ fn ui(
             PyroscopeSubScreenView::Flamegraph => {
                 "Esc: List  Tab: Switch View  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller  Enter/z: Zoom In  o: Zoom Out  s: Sandwich"
             }
-            PyroscopeSubScreenView::Timeline
-            | PyroscopeSubScreenView::ProfileHeatmap
-            | PyroscopeSubScreenView::SpanHeatmap => {
+            PyroscopeSubScreenView::Timeline | PyroscopeSubScreenView::ProfileHeatmap => {
                 "Esc: List  Tab: Switch View  j/k: Exemplar Next/Prev"
+            }
+            PyroscopeSubScreenView::SpanHeatmap if vm.tempo_datasource_picker_open => {
+                "Esc: Cancel  j/k: Select  Enter: Query Tempo"
+            }
+            PyroscopeSubScreenView::SpanHeatmap if vm.exemplar_detail_open => {
+                "Esc/Enter: Close  Ctrl+T: Open Trace  Ctrl+P: Open Profile"
+            }
+            PyroscopeSubScreenView::SpanHeatmap => {
+                "Esc: List  Tab: Switch View  j/k: Exemplar Next/Prev  Enter: Detail  Ctrl+T: Lookup Trace"
             }
         },
     };
@@ -1142,14 +1226,7 @@ fn ui(
             let split =
                 Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
             render_datasource_bar(frame, vm, split[0]);
-            let layout = pyroscope::render_pyroscope_mode(frame, vm, split[1], blink_on());
-            if let Some(p) = popup {
-                let unit = shared::pyroscope::ProfileUnit::from_profile_type_id(
-                    &vm.pyroscope_selected_profile_type,
-                );
-                p.render(frame, frame.area(), unit);
-            }
-            return layout;
+            pyroscope::render_pyroscope_mode(frame, vm, split[1], blink_on());
         }
         ScreenView::TempoMode => {
             let split =
@@ -1158,7 +1235,6 @@ fn ui(
             tempo::render_tempo_mode(frame, vm, split[1]);
         }
     }
-    None
 }
 
 fn render_datasource_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
@@ -1425,6 +1501,31 @@ fn spawn_flamegraph_fetch(
     });
 }
 
+fn spawn_flamegraph_by_profile_id(
+    tx: &mpsc::UnboundedSender<PyroscopeMsg>,
+    grafana_url: String,
+    ds_id: u64,
+    token: String,
+    profile_type: String,
+    service: String,
+    time_range: String,
+    now_ms: i64,
+    profile_id: String,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let window_ms = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
+        let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
+        let result = client
+            .select_merge_stacktraces_by_profile_id(
+                &profile_type, &service, now_ms - window_ms, now_ms, &profile_id,
+            )
+            .await
+            .map_err(|e| e.to_string());
+        let _ = tx.send(PyroscopeMsg::Flamegraph(result));
+    });
+}
+
 fn spawn_timeline_fetch(
     tx: &mpsc::UnboundedSender<PyroscopeMsg>,
     grafana_url: String,
@@ -1504,6 +1605,31 @@ fn spawn_span_heatmap_fetch(
 }
 
 // ── Tempo async helpers ───────────────────────────────────────────────────────
+
+fn spawn_span_traces_fetch(
+    tx: &mpsc::UnboundedSender<TempoMsg>,
+    grafana_url: String,
+    uid: String,
+    token: String,
+    span_ids: Vec<String>,
+    start_ms: i64,
+    end_ms: i64,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let start_s = (start_ms / 1000).max(0) as u64;
+        let end_s = (end_ms / 1000).max(0) as u64;
+        let client = tempo::TempoClient::new(grafana_url, uid, token);
+        let tx2 = tx.clone();
+        let result = client.traces_for_span_ids(&span_ids, start_s, end_s, |batch| {
+            let _ = tx2.send(TempoMsg::SpanTraceBatch(batch));
+        }).await;
+        if let Err(e) = result {
+            log::warn!("span→trace batch lookup failed: {e}");
+        }
+        let _ = tx.send(TempoMsg::SpanTraceLoadingDone);
+    });
+}
 
 fn spawn_tempo_search(
     tx: &mpsc::UnboundedSender<TempoMsg>,

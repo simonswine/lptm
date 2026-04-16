@@ -140,6 +140,19 @@ pub enum Event {
 
     ExemplarSelectNext,
     ExemplarSelectPrev,
+    ExemplarDetailOpen,
+    ExemplarDetailClose,
+
+    // Span Heatmap → Tempo datasource picker
+    SpanHeatmapOpenTempoPicker,
+    SpanHeatmapCloseTempoPicker,
+    SpanHeatmapTempoPickerNext,
+    SpanHeatmapTempoPickerPrev,
+    SpanHeatmapClearResults,
+    SpanHeatmapTempoLoadingStarted,
+    SpanHeatmapTempoLoadingDone,
+    SpanHeatmapTempoResultLoaded { span_id: String, trace_id: String },
+    SpanHeatmapTempoBatchLoaded(HashMap<String, String>),
 
     BackToServiceList,
     BackFromPyroscope,
@@ -285,6 +298,13 @@ pub struct Model {
     pub pyroscope_span_heatmap: Vec<crate::pyroscope::HeatmapSlot>,
 
     pub pyroscope_exemplar_index: usize,
+    pub exemplar_detail_open: bool,
+
+    // Span Heatmap → Tempo correlation
+    pub tempo_datasource_picker_open: bool,
+    pub tempo_picker_index: usize,
+    pub span_trace_loading: bool,
+    pub span_trace_lookup: HashMap<String, String>,
 
     // Tempo state
     pub tempo_query: String,
@@ -407,6 +427,14 @@ pub struct ViewModel {
     pub span_heatmap: Option<crate::pyroscope::HeatmapView>,
 
     pub pyroscope_exemplar_index: usize,
+    pub exemplar_detail_open: bool,
+
+    // Span Heatmap → Tempo correlation
+    pub tempo_datasource_picker_open: bool,
+    pub tempo_picker_index: usize,
+    pub tempo_datasources: Vec<DatasourceView>,
+    pub span_trace_loading: bool,
+    pub span_trace_lookup: HashMap<String, String>,
 
     // Tempo state
     pub tempo_query: String,
@@ -665,6 +693,59 @@ impl App for ExploreTui {
             Event::ExemplarSelectPrev => {
                 crate::pyroscope::app::handle_exemplar_select_prev(model)
             }
+            Event::ExemplarDetailOpen => {
+                model.exemplar_detail_open = true;
+                render()
+            }
+            Event::ExemplarDetailClose => {
+                model.exemplar_detail_open = false;
+                render()
+            }
+            Event::SpanHeatmapClearResults => {
+                model.span_trace_lookup.clear();
+                render()
+            }
+            Event::SpanHeatmapTempoLoadingStarted => {
+                model.span_trace_loading = true;
+                render()
+            }
+            Event::SpanHeatmapTempoLoadingDone => {
+                model.span_trace_loading = false;
+                render()
+            }
+            Event::SpanHeatmapOpenTempoPicker => {
+                model.tempo_datasource_picker_open = true;
+                model.tempo_picker_index = 0;
+                render()
+            }
+            Event::SpanHeatmapCloseTempoPicker => {
+                model.tempo_datasource_picker_open = false;
+                render()
+            }
+            Event::SpanHeatmapTempoPickerNext => {
+                let n = model.datasources.iter().filter(|d| d.ds_type == "tempo").count();
+                if n > 0 {
+                    model.tempo_picker_index = (model.tempo_picker_index + 1) % n;
+                }
+                render()
+            }
+            Event::SpanHeatmapTempoPickerPrev => {
+                let n = model.datasources.iter().filter(|d| d.ds_type == "tempo").count();
+                if n > 0 {
+                    model.tempo_picker_index = (model.tempo_picker_index + n - 1) % n;
+                }
+                render()
+            }
+            Event::SpanHeatmapTempoResultLoaded { span_id, trace_id } => {
+                if !trace_id.is_empty() {
+                    model.span_trace_lookup.insert(span_id, trace_id);
+                }
+                render()
+            }
+            Event::SpanHeatmapTempoBatchLoaded(map) => {
+                model.span_trace_lookup.extend(map);
+                render()
+            }
             Event::BackToServiceList => crate::pyroscope::app::handle_back_to_service_list(model),
             Event::BackFromPyroscope => crate::pyroscope::app::handle_back_from_pyroscope(model),
             Event::FlameMoveLeft => crate::pyroscope::app::handle_flame_move_left(model),
@@ -894,6 +975,27 @@ impl App for ExploreTui {
             model.history_selected_index.min(model.history_entries.len() - 1)
         };
 
+        let mut tempo_datasources: Vec<DatasourceView> = model
+            .datasources
+            .iter()
+            .filter(|ds| ds.ds_type == "tempo")
+            .map(|ds| DatasourceView {
+                id: ds.id,
+                uid: ds.uid.clone(),
+                name: ds.name.clone(),
+                ds_type: normalize_ds_type(&ds.ds_type).to_string(),
+                url: ds.url.clone(),
+                is_default: ds.is_default,
+                is_favourite: model.favourites.contains(&ds.uid),
+            })
+            .collect();
+        tempo_datasources.sort_by_key(|ds| if ds.is_favourite { 0u8 } else { 1u8 });
+        let tempo_picker_index = if tempo_datasources.is_empty() {
+            0
+        } else {
+            model.tempo_picker_index.min(tempo_datasources.len() - 1)
+        };
+
         ViewModel {
             datasource_filter: model.datasource_filter.clone(),
             datasource_filter_focused: model.datasource_filter_focused,
@@ -942,6 +1044,12 @@ impl App for ExploreTui {
             pyroscope_span_heatmap_error: model.pyroscope_span_heatmap_error.clone(),
             span_heatmap,
             pyroscope_exemplar_index: model.pyroscope_exemplar_index,
+            exemplar_detail_open: model.exemplar_detail_open,
+            tempo_datasource_picker_open: model.tempo_datasource_picker_open,
+            tempo_picker_index,
+            tempo_datasources,
+            span_trace_loading: model.span_trace_loading,
+            span_trace_lookup: model.span_trace_lookup.clone(),
             tempo_query: model.tempo_query.clone(),
             tempo_cursor_pos: model.tempo_cursor_pos,
             tempo_loading: model.tempo_loading,

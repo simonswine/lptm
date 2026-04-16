@@ -926,6 +926,8 @@ mod tests {
                 table_area,
                 ProfileUnit::Nanoseconds,
                 0, // first exemplar selected
+                None,
+                false,
             );
         }).unwrap();
 
@@ -958,6 +960,8 @@ mod tests {
                 table_area,
                 ProfileUnit::Nanoseconds,
                 0, // row 0 selected
+                None,
+                false,
             );
         }).unwrap();
 

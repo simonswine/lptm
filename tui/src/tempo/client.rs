@@ -126,6 +126,63 @@ fn parse_frame(frame: &Value) -> (Vec<TempoTrace>, String) {
     (traces, state)
 }
 
+/// Parse a span search publication — same `data/values` envelope as `parse_frame`.
+/// `values[0][0]` is a JSON blob: an array of trace objects each containing `spanSets`.
+/// Returns (span_id → trace_id map, state string).
+fn parse_span_frame(frame: &Value) -> (std::collections::HashMap<String, String>, String) {
+    #[derive(Deserialize)]
+    struct SpanTrace {
+        #[serde(rename = "traceID", default)]
+        trace_id: String,
+        #[serde(rename = "spanSets", default)]
+        span_sets: Vec<SpanSet>,
+    }
+    #[derive(Deserialize)]
+    struct SpanSet {
+        #[serde(default)]
+        spans: Vec<Span>,
+    }
+    #[derive(Deserialize)]
+    struct Span {
+        #[serde(rename = "spanID", default)]
+        span_id: String,
+    }
+
+    let values = match frame.pointer("/data/values") {
+        Some(v) => v,
+        None => return (Default::default(), String::new()),
+    };
+
+    let state = values
+        .get(2).and_then(|a| a.get(0)).and_then(|s| s.as_str())
+        .unwrap_or("").to_string();
+
+    if let Some(err) = values.get(3).and_then(|a| a.get(0)).and_then(|s| s.as_str()) {
+        if !err.is_empty() {
+            debug!("  span stream error: {err}");
+        }
+    }
+
+    let result_val = match values.get(0).and_then(|a| a.get(0)) {
+        Some(v) if !v.is_null() => v,
+        _ => return (Default::default(), state),
+    };
+
+    let traces: Vec<SpanTrace> = serde_json::from_value(result_val.clone()).unwrap_or_default();
+    let mut map = std::collections::HashMap::new();
+    for trace in traces {
+        for span_set in trace.span_sets {
+            for span in span_set.spans {
+                if !span.span_id.is_empty() {
+                    map.insert(span.span_id, trace.trace_id.clone());
+                }
+            }
+        }
+    }
+    debug!("  span frame: {} span→trace pairs, state={state}", map.len());
+    (map, state)
+}
+
 fn unix_to_iso(secs: u64) -> String {
     // Euclidean algorithm for Gregorian calendar (Hinnant 2010)
     let s = secs % 60;
@@ -184,6 +241,153 @@ impl TempoClient {
         Ok(user.org_id.to_string())
     }
 
+    /// Stream trace IDs for a set of span IDs using Grafana Live (Centrifuge).
+    /// `on_progress` is called with each intermediate batch as frames arrive.
+    pub async fn traces_for_span_ids(
+        &self,
+        span_ids: &[String],
+        start_s: u64,
+        end_s: u64,
+        on_progress: impl Fn(std::collections::HashMap<String, String>),
+    ) -> Result<()> {
+        let namespace = self.live_namespace().await?;
+
+        let ws_base = self
+            .grafana_url
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1);
+        let ws_url = format!("{}/api/live/ws", ws_base);
+
+        let mut request = ws_url.as_str().into_client_request()?;
+        request.headers_mut().insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {}", self.token))?,
+        );
+
+        let (mut ws, _) = connect_async(request).await?;
+
+        // ── 1. Connect ────────────────────────────────────────────────────────
+        ws.send(Message::Text(serde_json::to_string(&json!({
+            "id": 1,
+            "connect": { "name": "grafex", "version": "0.1.0" }
+        }))?))
+        .await?;
+
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    if t.trim() == "{}" { ws.send(Message::Text("{}".into())).await?; continue; }
+                    let v: Value = serde_json::from_str(&t)?;
+                    if v.get("id").and_then(|i| i.as_u64()) == Some(1) {
+                        if let Some(err) = v.get("error") {
+                            return Err(anyhow!("connect error: {err}"));
+                        }
+                        break;
+                    }
+                }
+                Some(Ok(Message::Ping(d))) => { ws.send(Message::Pong(d)).await?; }
+                Some(Err(e)) => return Err(anyhow!("WS error: {e}")),
+                None => return Err(anyhow!("WS closed before ConnectResult")),
+                _ => {}
+            }
+        }
+
+        // ── 2. Subscribe ──────────────────────────────────────────────────────
+        let query = format!(
+            "{{{}}}",
+            span_ids
+                .iter()
+                .map(|id| format!("span:id = \"{id}\""))
+                .collect::<Vec<_>>()
+                .join(" || ")
+        );
+        let channel = format!("{namespace}/ds/{}/search/{}", self.uid, Uuid::new_v4());
+        let from_iso = unix_to_iso(start_s);
+        let to_iso = unix_to_iso(end_s);
+        debug!("→ span lookup channel={channel} query={query}");
+
+        ws.send(Message::Text(serde_json::to_string(&json!({
+            "id": 2,
+            "subscribe": {
+                "channel": channel,
+                "flag": 1,
+                "data": {
+                    "refId": "A",
+                    "datasource": { "type": "tempo", "uid": self.uid },
+                    "queryType": "traceql",
+                    "tableType": "spans",
+                    "metricsQueryType": "range",
+                    "limit": span_ids.len(),
+                    "query": query,
+                    "timeRange": { "from": from_iso, "to": to_iso }
+                }
+            }
+        }))?))
+        .await?;
+
+        // ── 3. Stream ─────────────────────────────────────────────────────────
+        let mut subscribed = false;
+        let mut done = false;
+
+        'outer: loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    if t.trim() == "{}" {
+                        ws.send(Message::Text("{}".into())).await?;
+                        continue;
+                    }
+                    for line in t.lines() {
+                        let line = line.trim();
+                        if line.is_empty() { continue; }
+                        let raw: Value = match serde_json::from_str(line) {
+                            Ok(v) => v,
+                            Err(e) => { debug!("  parse error: {e}"); continue; }
+                        };
+
+                        if !subscribed && raw.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                            if let Some(err) = raw.get("error") {
+                                let code = err.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+                                let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+                                return Err(anyhow!("subscribe failed (code {code}): {msg}"));
+                            }
+                            subscribed = true;
+                            continue;
+                        }
+
+                        let msg: ServerMsg = serde_json::from_value(raw).unwrap_or(ServerMsg { id: None, push: None });
+                        if let Some(push) = msg.push {
+                            if let Some(pub_msg) = push.publication {
+                                let (pairs, state) = parse_span_frame(&pub_msg.data);
+                                if !pairs.is_empty() {
+                                    on_progress(pairs);
+                                }
+                                match state.as_str() {
+                                    "done" => { done = true; break; }
+                                    "error" => {
+                                        let err = pub_msg.data.pointer("/data/values/3/0")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        return Err(anyhow!("{err}"));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    if done { break 'outer; }
+                }
+                Some(Ok(Message::Ping(d))) => { ws.send(Message::Pong(d)).await?; }
+                Some(Ok(Message::Close(f))) => { debug!("← WS Close: {f:?}"); break; }
+                Some(Err(e)) => return Err(anyhow!("WS error: {e}")),
+                None => break,
+                _ => {}
+            }
+        }
+
+        let _ = ws.close(None).await;
+        Ok(())
+    }
+
     pub async fn search(&self, query: &str, start_s: u64, end_s: u64) -> Result<Vec<TempoTrace>> {
         let namespace = self.live_namespace().await?;
 
@@ -238,6 +442,15 @@ impl TempoClient {
         let to_iso = unix_to_iso(end_s);
         debug!("  channel={channel}  from={from_iso}  to={to_iso}  query={query}");
 
+        // A 32-char hex string is a raw trace ID — wrap it in a TraceQL filter.
+        // The Grafana Live search channel only understands TraceQL queries.
+        let is_trace_id = query.len() == 32 && query.chars().all(|c| c.is_ascii_hexdigit());
+        let traceql_query = if is_trace_id {
+            format!("{{ trace:id = \"{query}\" }}")
+        } else {
+            query.to_string()
+        };
+
         ws.send(Message::Text(serde_json::to_string(&json!({
             "id": 2,
             "subscribe": {
@@ -251,7 +464,7 @@ impl TempoClient {
                     "tableType": "traces",
                     "metricsQueryType": "range",
                     "serviceMapUseNativeHistograms": false,
-                    "query": query,
+                    "query": traceql_query,
                     "SpansPerSpanSet": 3,
                     "timeRange": { "from": from_iso, "to": to_iso }
                 }
@@ -263,62 +476,59 @@ impl TempoClient {
         // ── 3. Stream ─────────────────────────────────────────────────────────
         let mut subscribed = false;
         let mut traces = Vec::new();
+        let mut done = false;
 
-        loop {
+        'outer: loop {
             match ws.next().await {
                 Some(Ok(Message::Text(t))) => {
-                    if t.len() > 500 {
-                        debug!("← ({} bytes): {}…", t.len(), &t[..500]);
-                    } else {
-                        debug!("← {t}");
-                    }
-
                     if t.trim() == "{}" {
                         ws.send(Message::Text("{}".into())).await?;
                         continue;
                     }
+                    for line in t.lines() {
+                        let line = line.trim();
+                        if line.is_empty() { continue; }
+                        let raw: Value = match serde_json::from_str(line) {
+                            Ok(v) => v,
+                            Err(e) => { debug!("  parse error: {e}"); continue; }
+                        };
 
-                    let raw: Value = match serde_json::from_str(&t) {
-                        Ok(v) => v,
-                        Err(e) => { debug!("  parse error: {e}"); continue; }
-                    };
-
-                    // SubscribeResult (id=2)
-                    if !subscribed && raw.get("id").and_then(|i| i.as_u64()) == Some(2) {
-                        if let Some(err) = raw.get("error") {
-                            let code = err.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
-                            let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
-                            return Err(anyhow!("subscribe failed (code {code}): {msg}"));
+                        // SubscribeResult (id=2)
+                        if !subscribed && raw.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                            if let Some(err) = raw.get("error") {
+                                let code = err.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+                                let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+                                return Err(anyhow!("subscribe failed (code {code}): {msg}"));
+                            }
+                            subscribed = true;
+                            continue;
                         }
-                        subscribed = true;
-                        debug!("← SubscribeResult ok");
-                        continue;
-                    }
 
-                    // Publication push
-                    let msg: ServerMsg = serde_json::from_value(raw).unwrap_or(ServerMsg { id: None, push: None });
-                    if let Some(push) = msg.push {
-                        if let Some(pub_msg) = push.publication {
-                            let (new_traces, state) = parse_frame(&pub_msg.data);
-                            debug!("  push: {} traces  state={state}", new_traces.len());
-                            if !new_traces.is_empty() { traces = new_traces; }
-                            match state.as_str() {
-                                "done" => { debug!("  stream done"); break; }
-                                "error" => {
-                                    let err = pub_msg.data.pointer("/data/values/3/0")
-                                        .and_then(|s| s.as_str()).unwrap_or("unknown");
-                                    return Err(anyhow!("{err}"));
+                        // Publication push
+                        let msg: ServerMsg = serde_json::from_value(raw).unwrap_or(ServerMsg { id: None, push: None });
+                        if let Some(push) = msg.push {
+                            if let Some(pub_msg) = push.publication {
+                                let (new_traces, state) = parse_frame(&pub_msg.data);
+                                if !new_traces.is_empty() { traces = new_traces; }
+                                match state.as_str() {
+                                    "done" => { done = true; break; }
+                                    "error" => {
+                                        let err = pub_msg.data.pointer("/data/values/3/0")
+                                            .and_then(|s| s.as_str()).unwrap_or("unknown");
+                                        return Err(anyhow!("{err}"));
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                     }
+                    if done { break 'outer; }
                 }
                 Some(Ok(Message::Ping(d))) => { ws.send(Message::Pong(d)).await?; }
                 Some(Ok(Message::Close(f))) => { debug!("← WS Close: {f:?}"); break; }
-                Some(Ok(other)) => { debug!("← unexpected: {other:?}"); }
                 Some(Err(e)) => return Err(anyhow!("WS error: {e}")),
-                None => { debug!("← WS stream ended"); break; }
+                None => break,
+                _ => {}
             }
         }
 

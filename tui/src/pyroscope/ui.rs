@@ -11,18 +11,24 @@ use shared::{
     FlamegraphLevelView, FlamegraphView, PyroscopeSubScreenView, SandwichView, ViewModel,
 };
 
-/// Render pyroscope mode. Returns the heatmap layout if a heatmap screen was
-/// rendered (used by the caller for mouse hit-testing).
-pub fn render_pyroscope_mode(
-    frame: &mut Frame,
-    vm: &ViewModel,
-    area: Rect,
-    blink_on: bool,
-) -> Option<super::heatmap::HeatmapLayout> {
+/// Returns a 3-char wide spinner frame based on current time, or 3 spaces when not loading.
+fn spinner(loading: bool) -> &'static str {
+    if !loading {
+        return "   ";
+    }
+    const FRAMES: &[&str] = &[" ⠋ ", " ⠙ ", " ⠹ ", " ⠸ ", " ⠼ ", " ⠴ ", " ⠦ ", " ⠧ ", " ⠇ ", " ⠏ "];
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_millis() as usize;
+    FRAMES[(ms / 100) % FRAMES.len()]
+}
+
+pub fn render_pyroscope_mode(frame: &mut Frame, vm: &ViewModel, area: Rect, blink_on: bool) {
     match vm.pyroscope_sub_screen {
-        PyroscopeSubScreenView::ServiceList => { render_pyroscope_service_list(frame, vm, area); None }
-        PyroscopeSubScreenView::Flamegraph => { render_pyroscope_flamegraph_screen(frame, vm, area); None }
-        PyroscopeSubScreenView::Timeline => { render_pyroscope_timeline_screen(frame, vm, area, blink_on); None }
+        PyroscopeSubScreenView::ServiceList => render_pyroscope_service_list(frame, vm, area),
+        PyroscopeSubScreenView::Flamegraph => render_pyroscope_flamegraph_screen(frame, vm, area),
+        PyroscopeSubScreenView::Timeline => render_pyroscope_timeline_screen(frame, vm, area, blink_on),
         PyroscopeSubScreenView::ProfileHeatmap => render_pyroscope_heatmap_screen(frame, vm, area, false, blink_on),
         PyroscopeSubScreenView::SpanHeatmap => render_pyroscope_heatmap_screen(frame, vm, area, true, blink_on),
     }
@@ -534,32 +540,33 @@ fn render_pyroscope_heatmap_screen(
     area: Rect,
     span: bool,
     blink_on: bool,
-) -> Option<super::heatmap::HeatmapLayout> {
+) {
     let [info_area, tabs_area, chart_area] =
         Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)]).areas(area);
     render_profile_header(frame, vm, info_area);
     render_view_tabs(frame, vm, tabs_area);
 
-    let (loading, error, heatmap_data, title) = if span {
+    let (loading, error, heatmap_data, base_title) = if span {
         (
             vm.pyroscope_span_heatmap_loading,
             vm.pyroscope_span_heatmap_error.as_deref(),
             vm.span_heatmap.as_ref(),
-            " Span Heatmap ",
+            " Span Heatmap",
         )
     } else {
         (
             vm.pyroscope_heatmap_loading,
             vm.pyroscope_heatmap_error.as_deref(),
             vm.heatmap.as_ref(),
-            " Profile Heatmap ",
+            " Profile Heatmap",
         )
     };
 
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let hm_title = format!("{}{}", base_title, spinner(loading));
+    let block = Block::default().borders(Borders::ALL).title(hm_title);
     if loading {
         frame.render_widget(Paragraph::new("Loading…").block(block), chart_area);
-        return None;
+        return;
     }
     if let Some(err) = error {
         frame.render_widget(
@@ -568,7 +575,7 @@ fn render_pyroscope_heatmap_screen(
                 .block(block),
             chart_area,
         );
-        return None;
+        return;
     }
     if let Some(hm) = heatmap_data {
         let unit = ProfileUnit::from_profile_type_id(&vm.pyroscope_selected_profile_type);
@@ -577,9 +584,16 @@ fn render_pyroscope_heatmap_screen(
             Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(chart_area);
         let sel_exemplar = hm.exemplars.get(vm.pyroscope_exemplar_index);
         let hm_highlight = sel_exemplar.map(|e| (e.timestamp_ms, e.value as f64));
-        let layout = super::heatmap::render_heatmap(frame, hm, block, vis_area, unit, hm_highlight, blink_on);
-        render_exemplars(frame, &exemplars, &hm.varying_label_keys, table_area, unit, vm.pyroscope_exemplar_index);
-        layout
+        super::heatmap::render_heatmap(frame, hm, block, vis_area, unit, hm_highlight, blink_on);
+        let trace_lookup = if span { Some(&vm.span_trace_lookup) } else { None };
+        let trace_loading = span && vm.span_trace_loading;
+        render_exemplars(frame, &exemplars, &hm.varying_label_keys, table_area, unit, vm.pyroscope_exemplar_index, trace_lookup, trace_loading);
+        if span && vm.tempo_datasource_picker_open {
+            render_tempo_datasource_picker(frame, vm, chart_area);
+        }
+        if span && vm.exemplar_detail_open {
+            render_exemplar_detail(frame, vm, chart_area, unit);
+        }
     } else {
         frame.render_widget(
             Paragraph::new("No heatmap data.")
@@ -587,7 +601,6 @@ fn render_pyroscope_heatmap_screen(
                 .block(block),
             chart_area,
         );
-        None
     }
 }
 
@@ -599,7 +612,7 @@ fn render_timeline_exemplars(
     selected_idx: usize,
 ) {
     let exemplars: Vec<_> = tl.exemplars.iter().collect();
-    render_exemplars(frame, &exemplars, &tl.varying_label_keys, area, unit, selected_idx);
+    render_exemplars(frame, &exemplars, &tl.varying_label_keys, area, unit, selected_idx, None, false);
 }
 
 pub(super) fn render_exemplars(
@@ -609,8 +622,11 @@ pub(super) fn render_exemplars(
     area: Rect,
     unit: ProfileUnit,
     selected_idx: usize,
+    trace_lookup: Option<&std::collections::HashMap<String, String>>,
+    trace_loading: bool,
 ) {
-    let block = Block::default().borders(Borders::ALL).title(" Exemplars ");
+    let title = format!(" Exemplars{}", spinner(trace_loading));
+    let block = Block::default().borders(Borders::ALL).title(title);
 
     if exemplars.is_empty() {
         frame.render_widget(
@@ -622,6 +638,7 @@ pub(super) fn render_exemplars(
 
     let has_profile_id = exemplars.iter().any(|e| !e.profile_id.is_empty());
     let has_span_id = exemplars.iter().any(|e| !e.span_id.is_empty());
+    let has_trace_id = trace_lookup.map_or(false, |m| !m.is_empty());
 
     let bold_cyan = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     let mut header_cells = vec![
@@ -636,6 +653,9 @@ pub(super) fn render_exemplars(
     }
     if has_span_id {
         header_cells.push(Cell::from("Span ID").style(bold_cyan));
+    }
+    if has_trace_id {
+        header_cells.push(Cell::from("Trace ID").style(bold_cyan));
     }
 
     let rows: Vec<Row> = exemplars
@@ -655,6 +675,18 @@ pub(super) fn render_exemplars(
             if has_span_id {
                 cells.push(Cell::from(e.span_id.clone()).style(Style::default().fg(Color::DarkGray)));
             }
+            if has_trace_id {
+                let trace_id = trace_lookup
+                    .and_then(|m| m.get(&e.span_id))
+                    .cloned()
+                    .unwrap_or_default();
+                let style = if trace_id.is_empty() {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
+                cells.push(Cell::from(trace_id).style(style));
+            }
             Row::new(cells)
         })
         .collect();
@@ -669,6 +701,9 @@ pub(super) fn render_exemplars(
     if has_span_id {
         constraints.push(Constraint::Length(18));
     }
+    if has_trace_id {
+        constraints.push(Constraint::Length(32));
+    }
 
     let clamped = selected_idx.min(exemplars.len().saturating_sub(1));
     let table = Table::new(rows, constraints)
@@ -679,6 +714,114 @@ pub(super) fn render_exemplars(
     let mut table_state = TableState::default();
     table_state.select(Some(clamped));
     frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn render_exemplar_detail(frame: &mut Frame, vm: &ViewModel, area: Rect, unit: ProfileUnit) {
+    let hm = match vm.span_heatmap.as_ref() { Some(h) => h, None => return };
+    let exemplar = match hm.exemplars.get(vm.pyroscope_exemplar_index) { Some(e) => e, None => return };
+
+    let trace_id = vm.span_trace_lookup.get(&exemplar.span_id).cloned().unwrap_or_default();
+    let has_trace = !trace_id.is_empty();
+    let has_profile = !exemplar.profile_id.is_empty();
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let val = Style::default().fg(Color::White);
+    let cyan = Style::default().fg(Color::Cyan);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("time:       ", dim),
+            Span::styled(format_time_label(exemplar.timestamp_ms), val),
+        ]),
+        Line::from(vec![
+            Span::styled("value:      ", dim),
+            Span::styled(unit.format(exemplar.value as f64), val),
+        ]),
+    ];
+    for (k, v) in &exemplar.labels {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<12}", k), dim),
+            Span::styled(v.clone(), val),
+        ]));
+    }
+    if !exemplar.span_id.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("span id:    ", dim),
+            Span::styled(exemplar.span_id.clone(), val),
+        ]));
+    }
+    if has_trace {
+        lines.push(Line::from(vec![
+            Span::styled("trace id:   ", dim),
+            Span::styled(trace_id, cyan),
+        ]));
+    }
+    if has_profile {
+        lines.push(Line::from(vec![
+            Span::styled("profile id: ", dim),
+            Span::styled(exemplar.profile_id.clone(), val),
+        ]));
+    }
+
+    // Action hints
+    lines.push(Line::from(""));
+    if has_trace {
+        lines.push(Line::from(Span::styled("Ctrl+T  open trace in Tempo", Style::default().fg(Color::Yellow))));
+    }
+    if has_profile {
+        lines.push(Line::from(Span::styled("Ctrl+P  open span profile", Style::default().fg(Color::Yellow))));
+    }
+
+    let content_w = lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16;
+    let popup_w = (content_w + 4).min(area.width.saturating_sub(4)).max(36);
+    let popup_h = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
+    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Exemplar Detail "))
+            .style(Style::default().fg(Color::White)),
+        popup_area,
+    );
+}
+
+fn render_tempo_datasource_picker(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+    if vm.tempo_datasources.is_empty() {
+        return;
+    }
+
+    let max_name_len = vm.tempo_datasources.iter().map(|d| d.name.len()).max().unwrap_or(10);
+    let popup_w = (max_name_len as u16 + 6).min(area.width.saturating_sub(4)).max(24);
+    let popup_h = (vm.tempo_datasources.len() as u16 + 2).min(area.height.saturating_sub(4)).max(3);
+    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+    let items: Vec<ListItem> = vm
+        .tempo_datasources
+        .iter()
+        .map(|ds| {
+            let fav = if ds.is_favourite { "★ " } else { "  " };
+            ListItem::new(Line::from(vec![
+                Span::styled(fav, Style::default().fg(Color::Yellow)),
+                Span::raw(ds.name.clone()),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Select Tempo Datasource "))
+        .highlight_symbol(">> ")
+        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(vm.tempo_picker_index));
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_stateful_widget(list, popup_area, &mut list_state);
 }
 
 pub(super) fn heatmap_color(v: f64) -> Color {
