@@ -1,4 +1,5 @@
 mod client;
+mod highlight;
 mod ui;
 
 pub use client::LokiClient;

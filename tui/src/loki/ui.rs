@@ -1,7 +1,6 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame,
 };
@@ -18,16 +17,7 @@ pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     // ── Query input ───────────────────────────────────────────────────────────
     let query_block = Block::default().borders(Borders::ALL).title(" LogQL ");
 
-    let before = &vm.loki_query[..vm.loki_cursor_pos];
-    let after = &vm.loki_query[vm.loki_cursor_pos..];
-    let cursor_char = after.chars().next().map(|c| c.to_string()).unwrap_or_else(|| " ".into());
-    let after_cursor: String = after.chars().skip(1).collect();
-
-    let query_line = Line::from(vec![
-        Span::raw(before.to_owned()),
-        Span::styled(cursor_char, Style::default().fg(Color::Black).bg(Color::White)),
-        Span::raw(after_cursor),
-    ]);
+    let query_line = super::highlight::highlight_loki_query(&vm.loki_query, vm.loki_cursor_pos);
     frame.render_widget(Paragraph::new(query_line).block(query_block), split[0]);
 
     // ── Results area ──────────────────────────────────────────────────────────
