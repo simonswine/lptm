@@ -1,6 +1,7 @@
 pub mod analyzer;
 pub mod app;
 pub mod ast;
+pub mod completions;
 pub mod context;
 pub mod keywords;
 pub mod parser;
