@@ -1,6 +1,8 @@
 pub mod app;
+pub mod ast;
 pub mod context;
 pub mod keywords;
+pub mod parser;
 pub mod tokenizer;
 
 use serde::{Deserialize, Serialize};
