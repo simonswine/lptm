@@ -1,12 +1,12 @@
 use crux_core::{render::render, Command};
 use crux_http::command::Http;
 
-use crate::app::{active_datasource, Effect, Event, Model, Screen};
+use crate::app::{active_datasource, Effect, Event, LokiCompletionView, LokiDiagnosticView, Model, Screen};
 use crate::prometheus::context::{char_to_byte, word_boundary_byte};
 use crate::prometheus::app::percent_encode;
 use crate::prometheus::types::PrometheusStringListResponse;
 
-use super::context::{self, CompletionCtx};
+use super::completions::{self, CompletionItem, CompletionKind, CursorContext};
 use super::{LokiEntry, LokiStream};
 
 // ── Enter / leave ────────────────────────────────────────────────────────────
@@ -33,6 +33,10 @@ pub fn handle_enter_loki(model: &mut Model) -> Command<Effect, Event> {
     model.loki_label_names_cache.clear();
     model.loki_label_values_cache.clear();
     model.loki_label_names_loading = false;
+
+    // Reset diagnostics
+    model.loki_diagnostics.clear();
+    model.loki_type_context = None;
 
     // Fetch initial label names from Loki
     if model.datasources.is_empty() {
@@ -74,6 +78,7 @@ pub fn handle_loki_query_input(model: &mut Model, c: char) -> Command<Effect, Ev
     model.loki_query_dirty = true;
     model.loki_completion_dismissed = false;
     model.loki_completion_index = None;
+    update_loki_diagnostics(model);
     render()
 }
 
@@ -89,6 +94,7 @@ pub fn handle_loki_query_backspace(model: &mut Model) -> Command<Effect, Event> 
     }
     model.loki_completion_dismissed = false;
     model.loki_completion_index = None;
+    update_loki_diagnostics(model);
     render()
 }
 
@@ -232,22 +238,22 @@ pub fn handle_loki_trigger_completions(model: &mut Model) -> Command<Effect, Eve
 }
 
 pub fn handle_loki_completion_next(model: &mut Model) -> Command<Effect, Event> {
-    let completions = get_loki_completions(model);
-    if !completions.is_empty() {
+    let items = get_loki_completion_items(model);
+    if !items.is_empty() {
         model.loki_completion_dismissed = false;
         model.loki_completion_index = Some(match model.loki_completion_index {
             None => 0,
-            Some(i) => (i + 1) % completions.len(),
+            Some(i) => (i + 1) % items.len(),
         });
     }
     render()
 }
 
 pub fn handle_loki_completion_prev(model: &mut Model) -> Command<Effect, Event> {
-    let completions = get_loki_completions(model);
-    if !completions.is_empty() {
+    let items = get_loki_completion_items(model);
+    if !items.is_empty() {
         model.loki_completion_dismissed = false;
-        let len = completions.len();
+        let len = items.len();
         model.loki_completion_index = Some(match model.loki_completion_index {
             None => len - 1,
             Some(0) => len - 1,
@@ -258,29 +264,30 @@ pub fn handle_loki_completion_prev(model: &mut Model) -> Command<Effect, Event> 
 }
 
 pub fn handle_loki_completion_accept(model: &mut Model) -> Command<Effect, Event> {
-    let completions = get_loki_completions(model);
+    let items = get_loki_completion_items(model);
     let idx = model
         .loki_completion_index
-        .or(if completions.is_empty() { None } else { Some(0) });
+        .or(if items.is_empty() { None } else { Some(0) });
 
     if let Some(i) = idx {
-        if let Some(completion) = completions.get(i) {
-            let completion = completion.clone();
+        if let Some(item) = items.get(i) {
+            let label = item.label.clone();
             let cursor_byte = char_to_byte(&model.loki_query, model.loki_cursor_pos);
             let before = &model.loki_query[..cursor_byte];
             let word_start = word_boundary_byte(before);
 
             let mut new_query = model.loki_query[..word_start].to_string();
-            new_query.push_str(&completion);
+            new_query.push_str(&label);
             new_query.push_str(&model.loki_query[cursor_byte..]);
 
-            model.loki_cursor_pos = word_start + completion.len();
+            model.loki_cursor_pos = word_start + label.len();
             model.loki_query = new_query;
         }
     }
 
     model.loki_completion_index = None;
     model.loki_completion_dismissed = false;
+    update_loki_diagnostics(model);
     render_with_completion_cmds(model)
 }
 
@@ -341,15 +348,16 @@ pub fn handle_loki_label_values_loaded(
 
 // ── Completion helpers ───────────────────────────────────────────────────────
 
-pub fn get_loki_completions(model: &Model) -> Vec<String> {
+/// Return completion items using the new AST-driven engine.
+pub fn get_loki_completion_items(model: &Model) -> Vec<CompletionItem> {
     const MAX_COMPLETIONS: usize = 10;
 
     if model.screen != Screen::LokiMode || model.loki_completion_dismissed {
         return vec![];
     }
 
-    let ctx = context::detect_context(&model.loki_query, model.loki_cursor_pos);
-    context::compute_completions(
+    let ctx = completions::detect_cursor_context(&model.loki_query, model.loki_cursor_pos);
+    completions::compute_completion_items(
         &ctx,
         &model.loki_label_names_cache,
         &model.loki_label_values_cache,
@@ -357,12 +365,37 @@ pub fn get_loki_completions(model: &Model) -> Vec<String> {
     )
 }
 
+/// Build serializable completion views for the ViewModel.
+pub fn get_loki_completion_views(model: &Model) -> Vec<LokiCompletionView> {
+    get_loki_completion_items(model)
+        .into_iter()
+        .map(|item| LokiCompletionView {
+            kind_icon: completion_kind_icon(item.kind).to_string(),
+            label: item.label,
+            detail: item.detail,
+            documentation: item.documentation,
+        })
+        .collect()
+}
+
+fn completion_kind_icon(kind: CompletionKind) -> &'static str {
+    match kind {
+        CompletionKind::LabelName => "\u{f0cb}",  // label icon
+        CompletionKind::LabelValue => "\u{f10e}",  // value icon
+        CompletionKind::PipelineKeyword => "\u{f054}", // pipe/chevron
+        CompletionKind::Function => "\u{0192}",    // ƒ function
+        CompletionKind::AggregationOp => "\u{03a3}", // Σ sum
+        CompletionKind::Duration => "\u{23f1}",    // ⏱ timer
+        CompletionKind::Keyword => "\u{f0ad}",     // keyword
+    }
+}
+
 fn maybe_label_names_cmd(model: &Model) -> Option<Command<Effect, Event>> {
     let ds = active_datasource(model)?;
     let ds_id = ds.id;
-    let ctx = context::detect_context(&model.loki_query, model.loki_cursor_pos);
+    let ctx = completions::detect_cursor_context(&model.loki_query, model.loki_cursor_pos);
 
-    if let CompletionCtx::LabelName { ref selector, .. } = ctx {
+    if let CursorContext::LabelName { ref selector, .. } = ctx {
         if !selector.is_empty() && !model.loki_label_names_cache.contains_key(selector.as_str()) {
             let url = format!(
                 "{}/api/datasources/proxy/{}/loki/api/v1/labels?query={}",
@@ -388,9 +421,9 @@ fn maybe_label_names_cmd(model: &Model) -> Option<Command<Effect, Event>> {
 fn maybe_label_values_cmd(model: &Model) -> Option<Command<Effect, Event>> {
     let ds = active_datasource(model)?;
     let ds_id = ds.id;
-    let ctx = context::detect_context(&model.loki_query, model.loki_cursor_pos);
+    let ctx = completions::detect_cursor_context(&model.loki_query, model.loki_cursor_pos);
 
-    if let CompletionCtx::LabelValue {
+    if let CursorContext::LabelValue {
         ref label,
         ref selector,
         ..
@@ -437,4 +470,46 @@ fn render_with_completion_cmds(model: &Model) -> Command<Effect, Event> {
     } else {
         Command::all(std::iter::once(render()).chain(extra))
     }
+}
+
+// ── Diagnostics ─────────────────────────────────────────────────────────────
+
+fn update_loki_diagnostics(model: &mut Model) {
+    use super::analyzer::{analyze, Severity};
+    use super::parser::parse;
+
+    let result = parse(&model.loki_query);
+
+    let mut diagnostics = Vec::new();
+
+    // Parse errors
+    for error in &result.errors {
+        diagnostics.push(LokiDiagnosticView {
+            severity: "error".to_string(),
+            message: error.message.clone(),
+            start_byte: error.span.start,
+            end_byte: error.span.end,
+        });
+    }
+
+    // Semantic diagnostics + type context
+    if let Some(ref expr) = result.expr {
+        for diag in analyze(expr) {
+            diagnostics.push(LokiDiagnosticView {
+                severity: match diag.severity {
+                    Severity::Error => "error",
+                    Severity::Warning => "warning",
+                }
+                .to_string(),
+                message: diag.message,
+                start_byte: diag.span.start,
+                end_byte: diag.span.end,
+            });
+        }
+        model.loki_type_context = Some(super::analyzer::infer_type(expr).to_string());
+    } else {
+        model.loki_type_context = None;
+    }
+
+    model.loki_diagnostics = diagnostics;
 }

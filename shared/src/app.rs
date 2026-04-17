@@ -370,6 +370,10 @@ pub struct Model {
     pub loki_completion_index: Option<usize>,
     pub loki_completion_dismissed: bool,
     pub loki_label_names_loading: bool,
+
+    // Loki diagnostics (cached, recomputed on query changes)
+    pub loki_diagnostics: Vec<LokiDiagnosticView>,
+    pub loki_type_context: Option<String>,
 }
 
 // ── ViewModel types ───────────────────────────────────────────────────────────
@@ -399,6 +403,24 @@ pub struct DatasourceView {
     pub url: String,
     pub is_default: bool,
     pub is_favourite: bool,
+}
+
+/// A rich completion item for Loki mode (displayed in the completion popup).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LokiCompletionView {
+    pub label: String,
+    pub detail: Option<String>,
+    pub documentation: Option<String>,
+    pub kind_icon: String,
+}
+
+/// A diagnostic (parse error or semantic warning) for the Loki query box.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct LokiDiagnosticView {
+    pub severity: String,
+    pub message: String,
+    pub start_byte: usize,
+    pub end_byte: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -517,9 +539,13 @@ pub struct ViewModel {
     pub loki_context_highlight_index: usize,
     pub loki_context_labels: String,
 
-    pub loki_completions: Vec<String>,
+    pub loki_completion_items: Vec<LokiCompletionView>,
     pub loki_completion_index: Option<usize>,
     pub loki_completions_loading: bool,
+
+    // Loki diagnostics and type context
+    pub loki_diagnostics: Vec<LokiDiagnosticView>,
+    pub loki_type_context: Option<String>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -1185,9 +1211,11 @@ impl App for ExploreTui {
             loki_context_entries: model.loki_context_entries.clone(),
             loki_context_highlight_index: model.loki_context_highlight_index,
             loki_context_labels: model.loki_context_labels.clone(),
-            loki_completions: crate::loki::app::get_loki_completions(model),
+            loki_completion_items: crate::loki::app::get_loki_completion_views(model),
             loki_completion_index: model.loki_completion_index,
             loki_completions_loading: model.loki_label_names_loading,
+            loki_diagnostics: model.loki_diagnostics.clone(),
+            loki_type_context: model.loki_type_context.clone(),
         }
     }
 }

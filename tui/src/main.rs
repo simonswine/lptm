@@ -1158,7 +1158,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                             ScreenView::LokiMode => {
                                 let vm2 = app_core.core.view();
                                 let context_open = vm2.loki_context_open;
-                                let has_completions = !vm2.loki_completions.is_empty();
+                                let has_completions = !vm2.loki_completion_items.is_empty();
                                 drop(vm2);
 
                                 if context_open {
@@ -1375,7 +1375,7 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
         ScreenView::LokiMode => {
             if vm.loki_context_open {
                 "Ctrl+C: Quit  Esc: Back to results"
-            } else if !vm.loki_completions.is_empty() {
+            } else if !vm.loki_completion_items.is_empty() {
                 "Ctrl+C: Quit  Esc: Dismiss  Tab: Accept  ↑/↓: Select  Enter: Execute"
             } else if !vm.loki_results.is_empty() && !vm.loki_query_dirty {
                 "Ctrl+C: Quit  Esc: Back  ↑/↓: Navigate  Enter: Context  Tab: Complete"
@@ -1906,7 +1906,7 @@ fn spawn_loki_context_query(
 
         // Query lines BEFORE (inclusive of selected): end=ts, direction=backward
         let before_result = client
-            .query_range(&labels, 0, ts, context_lines, "backward")
+            .query_range(&labels, ts.saturating_sub(3600 * 1_000_000_000), ts, context_lines, "backward")
             .await;
 
         // Query lines AFTER (inclusive of selected): start=ts, direction=forward

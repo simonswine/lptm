@@ -5,8 +5,9 @@ pub mod pyroscope;
 pub mod tempo;
 
 pub use app::{
-    Datasource, DatasourceView, Effect, Event, ExploreTui, HistoryEntryView, Model,
-    PyroscopeSubScreenView, QueryResultsView, ScreenView, ViewModel,
+    Datasource, DatasourceView, Effect, Event, ExploreTui, HistoryEntryView,
+    LokiCompletionView, LokiDiagnosticView, Model, PyroscopeSubScreenView,
+    QueryResultsView, ScreenView, ViewModel,
 };
 pub use tempo::TempoTrace;
 pub use pyroscope::{FlamegraphFrameView, FlamegraphLevelView, FlamegraphView, SandwichView};

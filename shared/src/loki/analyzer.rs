@@ -63,6 +63,19 @@ pub fn analyze(expr: &Expr) -> Vec<Diagnostic> {
     diags
 }
 
+/// Infer a human-readable type label for the root expression.
+pub fn infer_type(expr: &Expr) -> &'static str {
+    match &expr.kind {
+        ExprKind::LogQuery { .. } => "Log Query",
+        ExprKind::RangeAggregation { .. } => "Metric (Range Aggregation)",
+        ExprKind::Aggregation { .. } => "Metric (Aggregation)",
+        ExprKind::BinOp { .. } => "Metric (Binary Op)",
+        ExprKind::NumberLit(_) => "Scalar",
+        ExprKind::StringLit(_) => "String",
+        ExprKind::Paren(inner) => infer_type(inner),
+    }
+}
+
 // ── Recursive analysis ─────────────────────────────────────────────────────────
 
 fn analyze_expr(expr: &Expr, diags: &mut Vec<Diagnostic>) -> ExprType {
