@@ -1,3 +1,4 @@
+pub mod analyzer;
 pub mod app;
 pub mod ast;
 pub mod context;
