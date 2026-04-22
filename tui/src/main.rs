@@ -215,6 +215,7 @@ enum TempoMsg {
     Result(Result<Vec<shared::TempoTrace>, String>),
     SpanTraceResult { span_id: String, trace_id: Option<String> },
     SpanTraceBatch(std::collections::HashMap<String, String>),
+    TraceDetail(Result<Vec<shared::TempoSpan>, String>),
     SpanTraceLoadingDone,
 }
 
@@ -298,6 +299,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                     }
                     TempoMsg::SpanTraceLoadingDone => {
                         app_core.update(Event::SpanHeatmapTempoLoadingDone);
+                    }
+                    TempoMsg::TraceDetail(result) => {
+                        app_core.update(Event::TempoTraceDetailLoaded(result));
                     }
                 }
             }
@@ -1053,6 +1057,35 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     (KeyCode::Esc, _) => {
                                         app_core.update(Event::BackFromTempo);
                                     }
+                                    // Results navigation — only when results exist
+                                    (KeyCode::Char('j'), _) | (KeyCode::Down, _)
+                                        if !vm.tempo_results.is_empty() =>
+                                    {
+                                        app_core.update(Event::TempoSelectNext);
+                                    }
+                                    (KeyCode::Char('k'), _) | (KeyCode::Up, _)
+                                        if !vm.tempo_results.is_empty() =>
+                                    {
+                                        app_core.update(Event::TempoSelectPrev);
+                                    }
+                                    (KeyCode::Enter, _) if !vm.tempo_results.is_empty() => {
+                                        // Open the selected trace in detail view
+                                        app_core.update(Event::TempoOpenTrace);
+                                        let vm3 = app_core.core.view();
+                                        let ds_uid = vm3
+                                            .datasources
+                                            .get(vm3.selected_index)
+                                            .map(|d| d.uid.clone());
+                                        if let Some(uid) = ds_uid {
+                                            spawn_trace_detail_fetch(
+                                                &tempo_tx,
+                                                grafana_url.clone(),
+                                                uid,
+                                                grafana_token.clone(),
+                                                vm3.trace_detail_trace_id.clone(),
+                                            );
+                                        }
+                                    }
                                     (KeyCode::Enter, _) => {
                                         let vm2 = app_core.core.view();
                                         if !vm2.tempo_query.trim().is_empty() {
@@ -1107,6 +1140,45 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         app_core.update(Event::TempoQueryInput(c));
                                     }
                                     _ => {}
+                                }
+                            }
+                            ScreenView::TempoTraceDetail => {
+                                if vm.trace_detail_filter_focused {
+                                    match key.code {
+                                        KeyCode::Esc | KeyCode::Enter => {
+                                            app_core.update(Event::TempoTraceDetailFilterBlur);
+                                        }
+                                        KeyCode::Backspace => {
+                                            app_core.update(Event::TempoTraceDetailFilterBackspace);
+                                        }
+                                        KeyCode::Char(c) => {
+                                            app_core.update(Event::TempoTraceDetailFilterInput(c));
+                                        }
+                                        _ => {}
+                                    }
+                                } else {
+                                    match (key.code, key.modifiers) {
+                                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                                        (KeyCode::Esc, _) => {
+                                            app_core.update(Event::BackFromTraceDetail);
+                                        }
+                                        (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
+                                            app_core.update(Event::TempoTraceDetailNext);
+                                        }
+                                        (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
+                                            app_core.update(Event::TempoTraceDetailPrev);
+                                        }
+                                        (KeyCode::Char('J'), _) => {
+                                            app_core.update(Event::TempoTraceDetailAttrScrollDown);
+                                        }
+                                        (KeyCode::Char('K'), _) => {
+                                            app_core.update(Event::TempoTraceDetailAttrScrollUp);
+                                        }
+                                        (KeyCode::Char('/'), _) => {
+                                            app_core.update(Event::TempoTraceDetailFilterFocus);
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                         }
@@ -1175,7 +1247,17 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
             "Ctrl+C: Quit  Esc: Back  Enter: Execute  Tab: Complete  ↓/↑: History/Select  ←/→: Cursor"
         }
         ScreenView::TempoMode => {
-            "Ctrl+C: Quit  Esc: Back  Enter: Execute  ←/→: Cursor"
+            if vm.tempo_results.is_empty() {
+                "Ctrl+C: Quit  Esc: Back  Enter: Execute  ←/→: Cursor"
+            } else {
+                "Ctrl+C: Quit  Esc: Back  Enter: Open Trace  j/k: Navigate  ←/→: Cursor"
+            }
+        }
+        ScreenView::TempoTraceDetail if vm.trace_detail_filter_focused => {
+            "Enter/Esc: Stop filtering  Backspace: Delete"
+        }
+        ScreenView::TempoTraceDetail => {
+            "Ctrl+C: Quit  Esc: Back  j/k: Span  J/K: Scroll attrs  /: Filter"
         }
         ScreenView::PyroscopeMode => match vm.pyroscope_sub_screen {
             PyroscopeSubScreenView::ServiceList if vm.pyroscope_profile_type_dropdown_open => {
@@ -1233,6 +1315,12 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
                 Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
             render_datasource_bar(frame, vm, split[0]);
             tempo::render_tempo_mode(frame, vm, split[1]);
+        }
+        ScreenView::TempoTraceDetail => {
+            let split =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
+            render_datasource_bar(frame, vm, split[0]);
+            tempo::render_trace_detail_mode(frame, vm, split[1]);
         }
     }
 }
@@ -1628,6 +1716,21 @@ fn spawn_span_traces_fetch(
             log::warn!("span→trace batch lookup failed: {e}");
         }
         let _ = tx.send(TempoMsg::SpanTraceLoadingDone);
+    });
+}
+
+fn spawn_trace_detail_fetch(
+    tx: &mpsc::UnboundedSender<TempoMsg>,
+    grafana_url: String,
+    uid: String,
+    token: String,
+    trace_id: String,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let client = tempo::TempoClient::new(grafana_url, uid, token);
+        let result = client.fetch_trace(&trace_id).await.map_err(|e| e.to_string());
+        let _ = tx.send(TempoMsg::TraceDetail(result));
     });
 }
 

@@ -3,7 +3,8 @@ use futures::{SinkExt, StreamExt};
 use log::debug;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use shared::TempoTrace;
+use shared::{TempoSpan, TempoTrace};
+use std::collections::HashMap;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
@@ -536,4 +537,375 @@ impl TempoClient {
         debug!("← {} traces total", traces.len());
         Ok(traces)
     }
+
+    /// Fetch a single trace by ID through Grafana.
+    ///
+    /// Tries two URL formats in order:
+    /// 1. `/api/datasources/uid/{uid}/resources/api/traces/{id}` — plugin CallResource (Grafana 8+)
+    /// 2. `/api/datasources/proxy/{numericId}/api/traces/{id}` — direct HTTP proxy (all versions)
+    ///
+    /// Returns all spans sorted by start time with tree depth computed.
+    pub async fn fetch_trace(&self, trace_id: &str) -> Result<Vec<TempoSpan>> {
+        // ── Attempt 1: resources endpoint (plugin CallResource) ───────────────
+        let resources_url = format!(
+            "{}/api/datasources/uid/{}/resources/api/traces/{}",
+            self.grafana_url, self.uid, trace_id
+        );
+        debug!("→ fetch_trace resources {resources_url}");
+        let resp = self
+            .http
+            .get(&resources_url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/json")
+            .send()
+            .await?;
+
+        if resp.status().is_success() {
+            let body_text = resp.text().await?;
+            debug!("← resources response (first 400 chars): {}", &body_text[..body_text.len().min(400)]);
+            let body: Value = serde_json::from_str(&body_text)
+                .map_err(|e| anyhow!("resources response JSON parse error: {e}"))?;
+            let spans = parse_otlp_trace(&body)?;
+            debug!("← {} spans (resources) for {trace_id}", spans.len());
+            return Ok(spans);
+        }
+
+        let first_status = resp.status();
+        let first_body = resp.text().await.unwrap_or_default();
+        debug!("  resources endpoint returned {first_status}: {first_body}");
+
+        // Only fall through on 404/405 — other errors are real failures.
+        if first_status != 404 && first_status != 405 {
+            return Err(anyhow!(
+                "GET {resources_url} returned {first_status}: {first_body}"
+            ));
+        }
+
+        // ── Attempt 2: direct HTTP proxy (by numeric datasource ID) ──────────
+        // Fetch the datasource info to get the numeric ID.
+        let ds_info_url = format!("{}/api/datasources/uid/{}", self.grafana_url, self.uid);
+        debug!("  looking up numeric id via {ds_info_url}");
+        let ds_resp = self
+            .http
+            .get(&ds_info_url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+
+        if !ds_resp.status().is_success() {
+            // Can't fall back — report the original error.
+            return Err(anyhow!(
+                "GET {resources_url} returned {first_status}: {first_body}"
+            ));
+        }
+
+        let ds_info: Value = ds_resp.json().await?;
+        let ds_id = ds_info
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                anyhow!("GET {resources_url} returned {first_status}: {first_body}")
+            })?;
+
+        let proxy_url = format!(
+            "{}/api/datasources/proxy/{}/api/traces/{}",
+            self.grafana_url, ds_id, trace_id
+        );
+        debug!("→ fetch_trace proxy {proxy_url}");
+        let proxy_resp = self
+            .http
+            .get(&proxy_url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/json")
+            .send()
+            .await?;
+
+        if !proxy_resp.status().is_success() {
+            let proxy_status = proxy_resp.status();
+            let proxy_body = proxy_resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "resources: {first_status} ({first_body}); \
+                 proxy: {proxy_status} ({proxy_body})"
+            ));
+        }
+
+        let body_text = proxy_resp.text().await?;
+        debug!("← proxy response (first 400 chars): {}", &body_text[..body_text.len().min(400)]);
+        let body: Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow!("proxy response JSON parse error: {e}"))?;
+        let spans = parse_otlp_trace(&body)?;
+        debug!("← {} spans (proxy) for {trace_id}", spans.len());
+        Ok(spans)
+    }
+}
+
+// ── OTLP JSON deserialization ─────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct OtlpBatch {
+    #[serde(default)]
+    resource: Option<OtlpResource>,
+    // Handle both scopeSpans (OTLP v1) and instrumentationLibrarySpans (legacy Tempo)
+    #[serde(rename = "scopeSpans", alias = "instrumentationLibrarySpans", default)]
+    scope_spans: Vec<OtlpScopeSpans>,
+}
+
+#[derive(Deserialize, Default)]
+struct OtlpResource {
+    #[serde(default)]
+    attributes: Vec<OtlpAttr>,
+}
+
+#[derive(Deserialize, Default)]
+struct OtlpScopeSpans {
+    #[serde(default)]
+    spans: Vec<OtlpSpan>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct OtlpSpan {
+    #[serde(default)]
+    span_id: String,
+    #[serde(default)]
+    parent_span_id: Option<String>,
+    #[serde(default)]
+    name: String,
+    /// In proto3 JSON this can be an integer (2) or a string ("SPAN_KIND_SERVER").
+    #[serde(default)]
+    kind: Option<Value>,
+    /// camelCase (standard OTLP JSON) or snake_case (some Tempo versions).
+    #[serde(alias = "start_time_unix_nano", default)]
+    start_time_unix_nano: Option<Value>,
+    #[serde(alias = "end_time_unix_nano", default)]
+    end_time_unix_nano: Option<Value>,
+    #[serde(default)]
+    attributes: Vec<OtlpAttr>,
+    #[serde(default)]
+    status: Option<OtlpStatus>,
+}
+
+#[derive(Deserialize, Default)]
+struct OtlpAttr {
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    value: OtlpAnyValue,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct OtlpAnyValue {
+    string_value: Option<String>,
+    int_value: Option<Value>,
+    bool_value: Option<bool>,
+    double_value: Option<f64>,
+}
+
+#[derive(Deserialize, Default)]
+struct OtlpStatus {
+    /// In proto3 JSON this can be an integer (2) or a string ("STATUS_CODE_ERROR").
+    #[serde(default)]
+    code: Option<Value>,
+}
+
+fn otlp_attr_to_string(v: &OtlpAnyValue) -> String {
+    if let Some(ref s) = v.string_value {
+        return s.clone();
+    }
+    if let Some(ref i) = v.int_value {
+        return match i {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            other => other.to_string(),
+        };
+    }
+    if let Some(b) = v.bool_value {
+        return b.to_string();
+    }
+    if let Some(d) = v.double_value {
+        return d.to_string();
+    }
+    String::new()
+}
+
+/// Convert proto3 JSON `kind` (integer or string enum) to an integer.
+fn span_kind_to_int(v: &Option<Value>) -> i32 {
+    match v {
+        Some(Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
+        Some(Value::String(s)) => match s.as_str() {
+            "SPAN_KIND_INTERNAL" => 1,
+            "SPAN_KIND_SERVER" => 2,
+            "SPAN_KIND_CLIENT" => 3,
+            "SPAN_KIND_PRODUCER" => 4,
+            "SPAN_KIND_CONSUMER" => 5,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Returns true when the proto3 JSON `status.code` indicates an error.
+/// Accepts both integer (2) and string ("STATUS_CODE_ERROR") forms.
+fn status_code_is_error(v: &Option<Value>) -> bool {
+    match v {
+        Some(Value::Number(n)) => n.as_i64().unwrap_or(0) == 2,
+        Some(Value::String(s)) => s == "STATUS_CODE_ERROR",
+        _ => false,
+    }
+}
+
+fn parse_nano_ts(v: &Option<Value>) -> u64 {
+    match v {
+        Some(Value::String(s)) => s.parse().unwrap_or(0),
+        Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn parse_otlp_trace(body: &Value) -> Result<Vec<TempoSpan>> {
+    // Tempo / OTLP returns one of:
+    //   { "batches": [...] }        — old Tempo proto-JSON format
+    //   { "resourceSpans": [...] }  — new OTLP JSON format (Tempo ≥ 2.x)
+    //   [...]                       — bare array (unlikely but handle anyway)
+    if let Some(obj) = body.as_object() {
+        let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        debug!("  trace response top-level keys: {:?}", keys);
+    }
+
+    let batches_val = body
+        .get("batches")
+        .or_else(|| body.get("resourceSpans"))
+        .unwrap_or(body);
+
+    // Log raw keys of first batch element for diagnostics
+    if let Some(first) = batches_val.as_array().and_then(|a| a.first()) {
+        if let Some(obj) = first.as_object() {
+            debug!("  first batch keys: {:?}", obj.keys().collect::<Vec<_>>());
+            // Also log keys of first span
+            let scope_key = ["scopeSpans", "instrumentationLibrarySpans"]
+                .iter()
+                .find(|k| obj.contains_key(**k))
+                .copied();
+            if let Some(sk) = scope_key {
+                if let Some(span) = obj[sk].as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|s| s.get("spans"))
+                    .and_then(|s| s.as_array())
+                    .and_then(|a| a.first())
+                {
+                    if let Some(sobj) = span.as_object() {
+                        debug!("  first span keys: {:?}", sobj.keys().collect::<Vec<_>>());
+                        debug!("  startTimeUnixNano = {:?}", sobj.get("startTimeUnixNano").or_else(|| sobj.get("start_time_unix_nano")));
+                    }
+                }
+            }
+        }
+    }
+
+    let batches: Vec<OtlpBatch> = match serde_json::from_value(batches_val.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("  failed to parse batches/resourceSpans: {e}");
+            return Ok(vec![]);
+        }
+    };
+    debug!("  parsed {} resource batches", batches.len());
+
+    let mut spans: Vec<TempoSpan> = Vec::new();
+
+    for batch in &batches {
+        let resource_attrs: Vec<(String, String)> = batch
+            .resource
+            .as_ref()
+            .map(|r| {
+                r.attributes
+                    .iter()
+                    .map(|a| (a.key.clone(), otlp_attr_to_string(&a.value)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let service_name = resource_attrs
+            .iter()
+            .find(|(k, _)| k == "service.name")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+
+        for scope in &batch.scope_spans {
+            for s in &scope.spans {
+                let start = parse_nano_ts(&s.start_time_unix_nano);
+                let end = parse_nano_ts(&s.end_time_unix_nano);
+                let duration_ns = end.saturating_sub(start);
+
+                // Normalize empty parent_span_id to None
+                let parent_span_id = match s.parent_span_id.as_deref() {
+                    Some("") | None => None,
+                    Some(p) => Some(p.to_string()),
+                };
+
+                let span_attrs: Vec<(String, String)> = s
+                    .attributes
+                    .iter()
+                    .map(|a| (a.key.clone(), otlp_attr_to_string(&a.value)))
+                    .collect();
+
+                let error = s
+                    .status
+                    .as_ref()
+                    .map(|st| status_code_is_error(&st.code))
+                    .unwrap_or(false);
+
+                let kind = span_kind_to_int(&s.kind);
+
+                spans.push(TempoSpan {
+                    span_id: s.span_id.clone(),
+                    parent_span_id,
+                    name: s.name.clone(),
+                    service_name: service_name.clone(),
+                    start_time_unix_nano: start,
+                    duration_ns,
+                    depth: 0, // computed below
+                    resource_attrs: resource_attrs.clone(),
+                    span_attrs,
+                    kind,
+                    error,
+                });
+            }
+        }
+    }
+
+    debug!("  extracted {} spans before depth computation", spans.len());
+
+    // Sort by start time ascending
+    spans.sort_by_key(|s| s.start_time_unix_nano);
+
+    // Compute depth iteratively (collect into a separate vec to satisfy borrow checker)
+    let id_to_idx: HashMap<String, usize> = spans
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.span_id.clone(), i))
+        .collect();
+
+    let depths: Vec<usize> = (0..spans.len())
+        .map(|i| {
+            let mut depth = 0usize;
+            let mut current_parent = spans[i].parent_span_id.clone();
+            while let Some(pid) = current_parent {
+                if let Some(&j) = id_to_idx.get(&pid) {
+                    depth += 1;
+                    current_parent = spans[j].parent_span_id.clone();
+                } else {
+                    break;
+                }
+            }
+            depth
+        })
+        .collect();
+
+    for (s, d) in spans.iter_mut().zip(depths) {
+        s.depth = d;
+    }
+
+    Ok(spans)
 }

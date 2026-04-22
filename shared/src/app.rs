@@ -15,7 +15,7 @@ use crate::pyroscope::{
     build_flamegraph_view, build_sandwich_view, FlameGraph, FlamegraphNav, FlamegraphView,
     SandwichView,
 };
-use crate::tempo::TempoTrace;
+use crate::tempo::{TempoSpan, TempoTrace};
 
 #[effect]
 pub enum Effect {
@@ -191,6 +191,21 @@ pub enum Event {
     TempoExecuteQuery,
     TempoResultLoaded(Result<Vec<TempoTrace>, String>),
     BackFromTempo,
+    TempoSelectNext,
+    TempoSelectPrev,
+    TempoOpenTrace,
+
+    // Trace detail
+    TempoTraceDetailLoaded(Result<Vec<TempoSpan>, String>),
+    TempoTraceDetailNext,
+    TempoTraceDetailPrev,
+    TempoTraceDetailFilterFocus,
+    TempoTraceDetailFilterBlur,
+    TempoTraceDetailFilterInput(char),
+    TempoTraceDetailFilterBackspace,
+    TempoTraceDetailAttrScrollDown,
+    TempoTraceDetailAttrScrollUp,
+    BackFromTraceDetail,
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -202,6 +217,7 @@ pub enum Screen {
     QueryMode,
     PyroscopeMode,
     TempoMode,
+    TempoTraceDetail,
 }
 
 impl std::fmt::Debug for Screen {
@@ -210,7 +226,8 @@ impl std::fmt::Debug for Screen {
             Screen::DatasourceList => write!(f, "DatasourceList"),
             Screen::QueryMode => write!(f, "QueryMode"),
             Screen::PyroscopeMode => write!(f, "PyroscopeMode"),
-                Screen::TempoMode => write!(f, "TempoMode"),
+            Screen::TempoMode => write!(f, "TempoMode"),
+            Screen::TempoTraceDetail => write!(f, "TempoTraceDetail"),
         }
     }
 }
@@ -312,6 +329,17 @@ pub struct Model {
     pub tempo_loading: bool,
     pub tempo_error: Option<String>,
     pub tempo_results: Vec<TempoTrace>,
+    pub tempo_results_selected: usize,
+
+    // Trace detail state
+    pub trace_detail_trace_id: String,
+    pub trace_detail_spans: Vec<TempoSpan>,
+    pub trace_detail_loading: bool,
+    pub trace_detail_error: Option<String>,
+    pub trace_detail_selected: usize,
+    pub trace_detail_filter: String,
+    pub trace_detail_filter_focused: bool,
+    pub trace_detail_attr_scroll: usize,
 }
 
 // ── ViewModel types ───────────────────────────────────────────────────────────
@@ -350,6 +378,7 @@ pub enum ScreenView {
     QueryMode,
     PyroscopeMode,
     TempoMode,
+    TempoTraceDetail,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -442,6 +471,17 @@ pub struct ViewModel {
     pub tempo_loading: bool,
     pub tempo_error: Option<String>,
     pub tempo_results: Vec<TempoTrace>,
+    pub tempo_results_selected: usize,
+
+    // Trace detail
+    pub trace_detail_trace_id: String,
+    pub trace_detail_spans: Vec<TempoSpan>,
+    pub trace_detail_loading: bool,
+    pub trace_detail_error: Option<String>,
+    pub trace_detail_selected: usize,
+    pub trace_detail_filter: String,
+    pub trace_detail_filter_focused: bool,
+    pub trace_detail_attr_scroll: usize,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -838,6 +878,33 @@ impl App for ExploreTui {
                 crate::tempo::app::handle_tempo_result_loaded(model, result)
             }
             Event::BackFromTempo => crate::tempo::app::handle_back_from_tempo(model),
+            Event::TempoSelectNext => crate::tempo::app::handle_tempo_select_next(model),
+            Event::TempoSelectPrev => crate::tempo::app::handle_tempo_select_prev(model),
+            Event::TempoOpenTrace => crate::tempo::app::handle_tempo_open_trace(model),
+            Event::TempoTraceDetailLoaded(result) => {
+                crate::tempo::app::handle_trace_detail_loaded(model, result)
+            }
+            Event::TempoTraceDetailNext => crate::tempo::app::handle_trace_detail_next(model),
+            Event::TempoTraceDetailPrev => crate::tempo::app::handle_trace_detail_prev(model),
+            Event::TempoTraceDetailFilterFocus => {
+                crate::tempo::app::handle_trace_detail_filter_focus(model)
+            }
+            Event::TempoTraceDetailFilterBlur => {
+                crate::tempo::app::handle_trace_detail_filter_blur(model)
+            }
+            Event::TempoTraceDetailFilterInput(c) => {
+                crate::tempo::app::handle_trace_detail_filter_input(model, c)
+            }
+            Event::TempoTraceDetailFilterBackspace => {
+                crate::tempo::app::handle_trace_detail_filter_backspace(model)
+            }
+            Event::TempoTraceDetailAttrScrollDown => {
+                crate::tempo::app::handle_trace_detail_attr_scroll_down(model)
+            }
+            Event::TempoTraceDetailAttrScrollUp => {
+                crate::tempo::app::handle_trace_detail_attr_scroll_up(model)
+            }
+            Event::BackFromTraceDetail => crate::tempo::app::handle_back_from_trace_detail(model),
 
             Event::SelectDatasource { uid, name } => {
                 model.datasource_filter.clear();
@@ -876,6 +943,7 @@ impl App for ExploreTui {
             Screen::QueryMode => ScreenView::QueryMode,
             Screen::PyroscopeMode => ScreenView::PyroscopeMode,
             Screen::TempoMode => ScreenView::TempoMode,
+            Screen::TempoTraceDetail => ScreenView::TempoTraceDetail,
         };
 
         let mut indices = filtered_datasource_indices(model);
@@ -1055,6 +1123,15 @@ impl App for ExploreTui {
             tempo_loading: model.tempo_loading,
             tempo_error: model.tempo_error.clone(),
             tempo_results: model.tempo_results.clone(),
+            tempo_results_selected: model.tempo_results_selected,
+            trace_detail_trace_id: model.trace_detail_trace_id.clone(),
+            trace_detail_spans: model.trace_detail_spans.clone(),
+            trace_detail_loading: model.trace_detail_loading,
+            trace_detail_error: model.trace_detail_error.clone(),
+            trace_detail_selected: model.trace_detail_selected,
+            trace_detail_filter: model.trace_detail_filter.clone(),
+            trace_detail_filter_focused: model.trace_detail_filter_focused,
+            trace_detail_attr_scroll: model.trace_detail_attr_scroll,
         }
     }
 }
@@ -1070,7 +1147,7 @@ fn normalize_ds_type(ds_type: &str) -> &str {
 
 // ── Datasource filter helpers ─────────────────────────────────────────────────
 
-fn fuzzy_match(haystack: &str, needle: &str) -> bool {
+pub(crate) fn fuzzy_match(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
     }
