@@ -6,7 +6,7 @@ pub mod tempo;
 
 pub use app::{
     Datasource, DatasourceView, Effect, Event, ExploreTui, HistoryEntryView,
-    LokiCompletionView, LokiDiagnosticView, Model, PyroscopeSubScreenView,
+    LokiDiagnosticView, Model, PyroscopeSubScreenView,
     QueryResultsView, ScreenView, ViewModel,
 };
 pub use tempo::TempoTrace;

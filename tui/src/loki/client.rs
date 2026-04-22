@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use log::debug;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Deserialize;
 use shared::loki::{LokiEntry, LokiStream};
 
@@ -104,6 +105,76 @@ impl LokiClient {
             .collect();
 
         Ok(streams)
+    }
+
+    /// Fetch all label names from Loki (optionally scoped to a selector).
+    pub async fn fetch_label_names(&self, selector: &str) -> Result<Vec<String>> {
+        let base = format!(
+            "{}/api/datasources/proxy/{}/loki/api/v1/labels",
+            self.grafana_url, self.ds_id
+        );
+        let url = if selector.is_empty() {
+            base
+        } else {
+            format!(
+                "{}?query={}",
+                base,
+                utf8_percent_encode(selector, NON_ALPHANUMERIC)
+            )
+        };
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("HTTP {status}: {body}"));
+        }
+        #[derive(Deserialize)]
+        struct LabelsResponse {
+            data: Vec<String>,
+        }
+        let body: LabelsResponse = resp.json().await?;
+        Ok(body.data)
+    }
+
+    /// Fetch values for a specific label (optionally scoped to a selector).
+    pub async fn fetch_label_values(&self, label: &str, selector: &str) -> Result<Vec<String>> {
+        let base = format!(
+            "{}/api/datasources/proxy/{}/loki/api/v1/label/{}/values",
+            self.grafana_url,
+            self.ds_id,
+            utf8_percent_encode(label, NON_ALPHANUMERIC)
+        );
+        let url = if selector.is_empty() {
+            base
+        } else {
+            format!(
+                "{}?query={}",
+                base,
+                utf8_percent_encode(selector, NON_ALPHANUMERIC)
+            )
+        };
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("HTTP {status}: {body}"));
+        }
+        #[derive(Deserialize)]
+        struct ValuesResponse {
+            data: Vec<String>,
+        }
+        let body: ValuesResponse = resp.json().await?;
+        Ok(body.data)
     }
 }
 

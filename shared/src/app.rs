@@ -195,10 +195,7 @@ pub enum Event {
 
     // Loki mode
     EnterLoki,
-    LokiQueryInput(char),
-    LokiQueryBackspace,
-    LokiQueryCursorLeft,
-    LokiQueryCursorRight,
+    LokiQueryChanged(String),
     LokiExecuteQuery,
     LokiResultLoaded(Result<Vec<LokiStream>, String>),
     LokiSelectNextRow,
@@ -207,22 +204,7 @@ pub enum Event {
     LokiCloseContext,
     LokiContextLoaded(Result<(Vec<crate::loki::LokiEntry>, usize), String>),
     BackFromLoki,
-
-    // Loki completion
-    LokiTriggerCompletions,
-    LokiCompletionNext,
-    LokiCompletionPrev,
-    LokiCompletionAccept,
-    LokiCompletionDismiss,
-    LokiLabelNamesLoaded(
-        String,
-        crux_http::Result<crux_http::Response<PrometheusStringListResponse>>,
-    ),
-    LokiLabelValuesLoaded(
-        String,
-        String,
-        crux_http::Result<crux_http::Response<PrometheusStringListResponse>>,
-    ),
+    LokiDiagnosticsUpdated(Vec<LokiDiagnosticView>),
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -349,12 +331,10 @@ pub struct Model {
 
     // Loki state
     pub loki_query: String,
-    pub loki_cursor_pos: usize,
     pub loki_loading: bool,
     pub loki_error: Option<String>,
     pub loki_results: Vec<LokiStream>,
     pub loki_selected_row: usize,
-    pub loki_query_dirty: bool,
     pub loki_context_open: bool,
     pub loki_context_loading: bool,
     pub loki_context_error: Option<String>,
@@ -362,18 +342,8 @@ pub struct Model {
     pub loki_context_highlight_index: usize,
     pub loki_context_labels: String,
 
-    // Loki autocomplete caches
-    pub loki_label_names_cache: HashMap<String, Vec<String>>,
-    pub loki_label_values_cache: HashMap<(String, String), Vec<String>>,
-
-    // Loki autocomplete UI state
-    pub loki_completion_index: Option<usize>,
-    pub loki_completion_dismissed: bool,
-    pub loki_label_names_loading: bool,
-
-    // Loki diagnostics (cached, recomputed on query changes)
+    // Loki diagnostics (pushed from LSP via LokiDiagnosticsUpdated)
     pub loki_diagnostics: Vec<LokiDiagnosticView>,
-    pub loki_type_context: Option<String>,
 }
 
 // ── ViewModel types ───────────────────────────────────────────────────────────
@@ -403,15 +373,6 @@ pub struct DatasourceView {
     pub url: String,
     pub is_default: bool,
     pub is_favourite: bool,
-}
-
-/// A rich completion item for Loki mode (displayed in the completion popup).
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LokiCompletionView {
-    pub label: String,
-    pub detail: Option<String>,
-    pub documentation: Option<String>,
-    pub kind_icon: String,
 }
 
 /// A diagnostic (parse error or semantic warning) for the Loki query box.
@@ -525,13 +486,10 @@ pub struct ViewModel {
     pub tempo_results: Vec<TempoTrace>,
 
     // Loki state
-    pub loki_query: String,
-    pub loki_cursor_pos: usize,
     pub loki_loading: bool,
     pub loki_error: Option<String>,
     pub loki_results: Vec<LokiStream>,
     pub loki_selected_row: usize,
-    pub loki_query_dirty: bool,
     pub loki_context_open: bool,
     pub loki_context_loading: bool,
     pub loki_context_error: Option<String>,
@@ -539,13 +497,8 @@ pub struct ViewModel {
     pub loki_context_highlight_index: usize,
     pub loki_context_labels: String,
 
-    pub loki_completion_items: Vec<LokiCompletionView>,
-    pub loki_completion_index: Option<usize>,
-    pub loki_completions_loading: bool,
-
-    // Loki diagnostics and type context
+    // Loki diagnostics (pushed from LSP)
     pub loki_diagnostics: Vec<LokiDiagnosticView>,
-    pub loki_type_context: Option<String>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -947,10 +900,7 @@ impl App for ExploreTui {
             // ── Loki ─────────────────────────────────────────────────────────
 
             Event::EnterLoki => crate::loki::app::handle_enter_loki(model),
-            Event::LokiQueryInput(c) => crate::loki::app::handle_loki_query_input(model, c),
-            Event::LokiQueryBackspace => crate::loki::app::handle_loki_query_backspace(model),
-            Event::LokiQueryCursorLeft => crate::loki::app::handle_loki_cursor_left(model),
-            Event::LokiQueryCursorRight => crate::loki::app::handle_loki_cursor_right(model),
+            Event::LokiQueryChanged(q) => crate::loki::app::handle_loki_query_changed(model, q),
             Event::LokiExecuteQuery => crate::loki::app::handle_loki_execute_query(model),
             Event::LokiResultLoaded(result) => {
                 crate::loki::app::handle_loki_result_loaded(model, result)
@@ -963,22 +913,8 @@ impl App for ExploreTui {
                 crate::loki::app::handle_loki_context_loaded(model, result)
             }
             Event::BackFromLoki => crate::loki::app::handle_back_from_loki(model),
-
-            // ── Loki completion ──────────────────────────────────────────
-            Event::LokiTriggerCompletions => {
-                crate::loki::app::handle_loki_trigger_completions(model)
-            }
-            Event::LokiCompletionNext => crate::loki::app::handle_loki_completion_next(model),
-            Event::LokiCompletionPrev => crate::loki::app::handle_loki_completion_prev(model),
-            Event::LokiCompletionAccept => crate::loki::app::handle_loki_completion_accept(model),
-            Event::LokiCompletionDismiss => {
-                crate::loki::app::handle_loki_completion_dismiss(model)
-            }
-            Event::LokiLabelNamesLoaded(sel, resp) => {
-                crate::loki::app::handle_loki_label_names_loaded(model, sel, resp)
-            }
-            Event::LokiLabelValuesLoaded(lbl, sel, resp) => {
-                crate::loki::app::handle_loki_label_values_loaded(model, lbl, sel, resp)
+            Event::LokiDiagnosticsUpdated(diags) => {
+                crate::loki::app::handle_loki_diagnostics_updated(model, diags)
             }
 
             Event::SelectDatasource { uid, name } => {
@@ -1198,24 +1134,17 @@ impl App for ExploreTui {
             tempo_loading: model.tempo_loading,
             tempo_error: model.tempo_error.clone(),
             tempo_results: model.tempo_results.clone(),
-            loki_query: model.loki_query.clone(),
-            loki_cursor_pos: model.loki_cursor_pos,
             loki_loading: model.loki_loading,
             loki_error: model.loki_error.clone(),
             loki_results: model.loki_results.clone(),
             loki_selected_row: model.loki_selected_row,
-            loki_query_dirty: model.loki_query_dirty,
             loki_context_open: model.loki_context_open,
             loki_context_loading: model.loki_context_loading,
             loki_context_error: model.loki_context_error.clone(),
             loki_context_entries: model.loki_context_entries.clone(),
             loki_context_highlight_index: model.loki_context_highlight_index,
             loki_context_labels: model.loki_context_labels.clone(),
-            loki_completion_items: crate::loki::app::get_loki_completion_views(model),
-            loki_completion_index: model.loki_completion_index,
-            loki_completions_loading: model.loki_label_names_loading,
             loki_diagnostics: model.loki_diagnostics.clone(),
-            loki_type_context: model.loki_type_context.clone(),
         }
     }
 }

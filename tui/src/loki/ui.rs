@@ -5,16 +5,77 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame,
 };
-use shared::ViewModel;
+use shared::{LokiDiagnosticView, ViewModel};
+use tui_textarea::TextArea;
 
-pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
+use super::lsp::CompletionItem;
+
+// ── LokiUiState ──────────────────────────────────────────────────────────────
+
+/// All per-session Loki UI state that lives outside the Crux model.
+pub struct LokiUiState {
+    /// The query text input widget.
+    pub textarea: TextArea<'static>,
+    /// Completions received from the LSP server.
+    pub completions: Vec<CompletionItem>,
+    /// Which completion is currently highlighted (None = none / first auto).
+    pub completion_index: Option<usize>,
+    /// True if the user dismissed the popup (reset on next keystroke).
+    pub completion_dismissed: bool,
+    /// Diagnostics received from `textDocument/publishDiagnostics`.
+    pub diagnostics: Vec<LokiDiagnosticView>,
+    /// True when the query has been changed since the last execution.
+    pub query_dirty: bool,
+}
+
+/// Create a fresh textarea with the standard LogQL styling (border + title).
+pub fn styled_textarea() -> TextArea<'static> {
+    let mut ta = TextArea::default();
+    ta.set_block(Block::default().borders(Borders::ALL).title(" LogQL "));
+    ta.set_cursor_line_style(Style::default()); // no cursor-line highlight
+    ta.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+    ta
+}
+
+impl LokiUiState {
+    pub fn new() -> Self {
+        LokiUiState {
+            textarea: styled_textarea(),
+            completions: vec![],
+            completion_index: None,
+            completion_dismissed: false,
+            diagnostics: vec![],
+            query_dirty: false,
+        }
+    }
+
+    /// Current query text (single line).
+    pub fn query(&self) -> &str {
+        self.textarea.lines().first().map(|s| s.as_str()).unwrap_or("")
+    }
+
+    /// Cursor column (0-based UTF-16 character offset, suitable for LSP).
+    pub fn cursor_char_col(&self) -> u32 {
+        let (_, col) = self.textarea.cursor();
+        col as u32
+    }
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────────
+
+pub fn render_loki_mode(
+    frame: &mut Frame,
+    vm: &ViewModel,
+    area: Rect,
+    loki_state: &LokiUiState,
+) {
     if vm.loki_context_open {
         render_context_view(frame, vm, area);
         return;
     }
 
-    // Layout: query box (3 lines) + diagnostics/type line (1) + results (rest)
-    let has_diagnostics = !vm.loki_diagnostics.is_empty() || vm.loki_type_context.is_some();
+    // Layout: query box (3 lines) + diagnostics line (1) + results (rest)
+    let has_diagnostics = !loki_state.diagnostics.is_empty();
     let info_height = if has_diagnostics { 1 } else { 0 };
 
     let split = Layout::vertical([
@@ -24,19 +85,12 @@ pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     ])
     .split(area);
 
-    // ── Query input with diagnostic underlines ──────────────────────────────
-    let query_block = Block::default().borders(Borders::ALL).title(" LogQL ");
+    // ── Query input (tui-textarea) ────────────────────────────────────────────
+    frame.render_widget(&loki_state.textarea, split[0]);
 
-    let query_line = build_query_line_with_diagnostics(
-        &vm.loki_query,
-        vm.loki_cursor_pos,
-        &vm.loki_diagnostics,
-    );
-    frame.render_widget(Paragraph::new(query_line).block(query_block), split[0]);
-
-    // ── Diagnostic / type context info line ──────────────────────────────────
+    // ── Diagnostic info line ──────────────────────────────────────────────────
     if has_diagnostics {
-        let info_line = build_info_line(vm, split[1].width);
+        let info_line = build_info_line(&loki_state.diagnostics, split[1].width);
         frame.render_widget(Paragraph::new(info_line), split[1]);
     }
 
@@ -49,6 +103,7 @@ pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
             Paragraph::new("Searching\u{2026}").block(results_block),
             results_area,
         );
+        render_completion_popup(frame, loki_state, split[0], results_area);
         return;
     }
 
@@ -59,11 +114,12 @@ pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
                 .block(results_block),
             results_area,
         );
+        render_completion_popup(frame, loki_state, split[0], results_area);
         return;
     }
 
     if vm.loki_results.is_empty() {
-        let hint = if vm.loki_query.trim().is_empty() {
+        let hint = if loki_state.query().trim().is_empty() {
             "Type a LogQL expression and press Enter.  Example: {job=\"varlogs\"}"
         } else {
             "No logs found."
@@ -74,6 +130,7 @@ pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
                 .block(results_block),
             results_area,
         );
+        render_completion_popup(frame, loki_state, split[0], results_area);
         return;
     }
 
@@ -116,123 +173,112 @@ pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     table_state.select(Some(vm.loki_selected_row));
     frame.render_stateful_widget(table, results_area, &mut table_state);
 
-    render_completion_popup(frame, vm, results_area);
+    render_completion_popup(frame, loki_state, split[0], results_area);
 }
 
-/// Build the query line with syntax highlighting and diagnostic underlines.
-///
-/// Diagnostic underlines are rendered as colored underlines directly on the
-/// syntax-highlighted text using `Modifier::UNDERLINED` + `underline_color`,
-/// so highlighting and diagnostics compose on a single line.
-fn build_query_line_with_diagnostics(
-    query: &str,
-    cursor_pos: usize,
-    diagnostics: &[shared::LokiDiagnosticView],
-) -> Line<'static> {
-    let highlighted = super::highlight::highlight_loki_query(query, cursor_pos);
+// ── Completion popup ──────────────────────────────────────────────────────────
 
-    if diagnostics.is_empty() || query.is_empty() {
-        return highlighted;
+fn render_completion_popup(
+    frame: &mut Frame,
+    loki_state: &LokiUiState,
+    query_area: Rect,
+    results_area: Rect,
+) {
+    if loki_state.completion_dismissed || loki_state.completions.is_empty() {
+        return;
     }
 
-    // Map each query byte to an optional underline style
-    let query_len = query.len();
-    let mut ul_map: Vec<Option<Style>> = vec![None; query_len];
-    for diag in diagnostics {
-        let ul = if diag.severity == "error" {
-            Style::default()
-                .add_modifier(Modifier::UNDERLINED)
-                .underline_color(Color::Red)
-        } else {
-            Style::default()
-                .add_modifier(Modifier::UNDERLINED)
-                .underline_color(Color::Yellow)
-        };
-        let start = diag.start_byte.min(query_len);
-        let end = diag.end_byte.min(query_len);
-        for pos in start..end {
-            ul_map[pos] = Some(ul);
-        }
+    let items = &loki_state.completions;
+
+    // Position popup just below the query box, aligned to cursor column.
+    let (_, cursor_col) = loki_state.textarea.cursor();
+    // +1 for the border, +2 for "kind_icon " prefix in the widget
+    let popup_x = (query_area.x + 1 + cursor_col as u16)
+        .min(query_area.x + query_area.width.saturating_sub(20));
+    let popup_y = query_area.y + 3; // just below the 3-line query box
+
+    // Width: longest label + detail + icon
+    let max_label_len = items.iter().map(|c| c.label.len()).max().unwrap_or(10);
+    let max_detail_len = items
+        .iter()
+        .filter_map(|c| c.detail.as_ref())
+        .map(|d| d.len())
+        .max()
+        .unwrap_or(0);
+    let content_w = 4 + max_label_len + if max_detail_len > 0 { 2 + max_detail_len } else { 0 };
+    let popup_w = ((content_w as u16) + 4)
+        .max(20)
+        .min(results_area.x + results_area.width - popup_x);
+    let popup_h = ((items.len() as u16) + 2)
+        .min(12)
+        .min(results_area.y + results_area.height - popup_y);
+
+    if popup_w == 0 || popup_h == 0 {
+        return;
     }
 
-    // Walk highlighted spans, overlay diagnostic underline styles
-    let mut out: Vec<Span<'static>> = Vec::new();
-    let mut byte_off = 0usize;
+    let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+    frame.render_widget(Clear, popup_area);
 
-    for span in highlighted.spans {
-        let base = span.style;
-        let text = span.content.into_owned();
-        let len = text.len();
+    let list_items: Vec<ListItem> = items
+        .iter()
+        .map(|c| {
+            let mut spans = vec![
+                Span::styled(
+                    format!("{} ", c.kind_icon),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(c.label.clone()),
+            ];
+            if let Some(ref detail) = c.detail {
+                spans.push(Span::styled(
+                    format!("  {detail}"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
 
-        let overlap = if byte_off < query_len {
-            len.min(query_len - byte_off)
-        } else {
-            0
-        };
+    let mut list_state = ListState::default();
+    list_state.select(loki_state.completion_index);
 
-        if overlap == 0 {
-            // Past query bytes (e.g. cursor-at-end space)
-            out.push(Span::styled(text, base));
-        } else {
-            let mut i = 0;
-            while i < overlap {
-                let cur = ul_map[byte_off + i];
-                let mut j = i + 1;
-                while j < overlap && ul_map[byte_off + j] == cur {
-                    j += 1;
+    let list = List::new(list_items)
+        .block(Block::default().borders(Borders::ALL).title(" Completions "))
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White));
+
+    frame.render_stateful_widget(list, popup_area, &mut list_state);
+
+    // Documentation panel below the popup.
+    if let Some(idx) = loki_state.completion_index {
+        if let Some(item) = items.get(idx) {
+            if let Some(ref doc) = item.documentation {
+                let doc_y = popup_area.y + popup_area.height;
+                if doc_y < results_area.y + results_area.height {
+                    let doc_w = popup_w.max(doc.len() as u16 + 4).min(
+                        results_area.x + results_area.width - popup_x,
+                    );
+                    let doc_h = 3u16.min(results_area.y + results_area.height - doc_y);
+                    let doc_area = Rect::new(popup_x, doc_y, doc_w, doc_h);
+                    frame.render_widget(Clear, doc_area);
+                    let doc_widget = Paragraph::new(doc.clone())
+                        .block(Block::default().borders(Borders::ALL))
+                        .style(Style::default().fg(Color::DarkGray));
+                    frame.render_widget(doc_widget, doc_area);
                 }
-                let style = match cur {
-                    Some(ul) => base.patch(ul),
-                    None => base,
-                };
-                out.push(Span::styled(text[i..j].to_owned(), style));
-                i = j;
-            }
-            if overlap < len {
-                out.push(Span::styled(text[overlap..].to_owned(), base));
             }
         }
-
-        byte_off += len;
     }
-
-    Line::from(out)
 }
 
-/// Build the info line showing type context and the cursor-relevant diagnostic.
-///
-/// When the cursor is inside a diagnostic span, that diagnostic's message is
-/// shown. Otherwise the first diagnostic is used as a fallback. Messages are
-/// truncated with an ellipsis when the terminal is too narrow, and a count
-/// badge is appended when multiple diagnostics exist.
-fn build_info_line(vm: &ViewModel, max_width: u16) -> Line<'static> {
+// ── Diagnostic info line ──────────────────────────────────────────────────────
+
+fn build_info_line(diagnostics: &[LokiDiagnosticView], max_width: u16) -> Line<'static> {
     let mut parts: Vec<Span<'static>> = Vec::new();
     let max_w = max_width as usize;
-    let mut used = 0usize;
 
-    // Type context
-    if let Some(ref tc) = vm.loki_type_context {
-        let text = format!(" {tc} ");
-        used += text.chars().count();
-        parts.push(Span::styled(text, Style::default().fg(Color::Cyan)));
-    }
-
-    // Find the diagnostic under the cursor, fall back to the first
-    let diag = vm
-        .loki_diagnostics
-        .iter()
-        .find(|d| vm.loki_cursor_pos >= d.start_byte && vm.loki_cursor_pos < d.end_byte)
-        .or_else(|| vm.loki_diagnostics.first());
-
+    let diag = diagnostics.first();
     if let Some(diag) = diag {
-        if !parts.is_empty() {
-            parts.push(Span::styled(
-                " \u{2502} ",
-                Style::default().fg(Color::DarkGray),
-            ));
-            used += 3;
-        }
-
         let style = if diag.severity == "error" {
             Style::default().fg(Color::Red)
         } else {
@@ -245,7 +291,7 @@ fn build_info_line(vm: &ViewModel, max_width: u16) -> Line<'static> {
         };
         let icon_w = icon.chars().count();
 
-        let count = vm.loki_diagnostics.len();
+        let count = diagnostics.len();
         let count_text = if count > 1 {
             format!(" [{count}]")
         } else {
@@ -253,7 +299,7 @@ fn build_info_line(vm: &ViewModel, max_width: u16) -> Line<'static> {
         };
         let count_w = count_text.chars().count();
 
-        let budget = max_w.saturating_sub(used + icon_w + count_w);
+        let budget = max_w.saturating_sub(icon_w + count_w);
         let msg_chars: Vec<char> = diag.message.chars().collect();
 
         let display = if msg_chars.len() > budget && budget > 1 {
@@ -277,95 +323,7 @@ fn build_info_line(vm: &ViewModel, max_width: u16) -> Line<'static> {
     Line::from(parts)
 }
 
-fn render_completion_popup(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let has_completions = !vm.loki_completion_items.is_empty();
-    let show_loading = vm.loki_completions_loading && !has_completions;
-
-    if !has_completions && !show_loading {
-        return;
-    }
-
-    if show_loading {
-        let popup_w = 20u16.min(area.width);
-        let popup_h = 3u16.min(area.height);
-        let popup_area = Rect::new(area.x, area.y, popup_w, popup_h);
-        frame.render_widget(Clear, popup_area);
-        let loading = Paragraph::new("Loading\u{2026}")
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(loading, popup_area);
-        return;
-    }
-
-    // Compute popup width: kind_icon + " " + label + "  " + detail
-    let max_label_len = vm
-        .loki_completion_items
-        .iter()
-        .map(|c| c.label.len())
-        .max()
-        .unwrap_or(10);
-    let max_detail_len = vm
-        .loki_completion_items
-        .iter()
-        .filter_map(|c| c.detail.as_ref())
-        .map(|d| d.len())
-        .max()
-        .unwrap_or(0);
-    let content_w = 4 + max_label_len + if max_detail_len > 0 { 2 + max_detail_len } else { 0 };
-    let popup_w = ((content_w as u16) + 4).max(20).min(area.width);
-    let popup_h = ((vm.loki_completion_items.len() as u16) + 2).min(12).min(area.height);
-    let popup_area = Rect::new(area.x, area.y, popup_w, popup_h);
-
-    frame.render_widget(Clear, popup_area);
-
-    let items: Vec<ListItem> = vm
-        .loki_completion_items
-        .iter()
-        .map(|c| {
-            let mut spans = vec![
-                Span::styled(
-                    format!("{} ", c.kind_icon),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw(c.label.clone()),
-            ];
-            if let Some(ref detail) = c.detail {
-                spans.push(Span::styled(
-                    format!("  {detail}"),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
-
-    let mut list_state = ListState::default();
-    list_state.select(vm.loki_completion_index);
-
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Completions "))
-        .highlight_style(Style::default().fg(Color::Black).bg(Color::White));
-
-    frame.render_stateful_widget(list, popup_area, &mut list_state);
-
-    // Show documentation for the selected item below the popup
-    if let Some(idx) = vm.loki_completion_index {
-        if let Some(item) = vm.loki_completion_items.get(idx) {
-            if let Some(ref doc) = item.documentation {
-                let doc_y = popup_area.y + popup_area.height;
-                if doc_y < area.y + area.height {
-                    let doc_w = popup_w.max(doc.len() as u16 + 4).min(area.width);
-                    let doc_h = 3u16.min(area.y + area.height - doc_y);
-                    let doc_area = Rect::new(popup_area.x, doc_y, doc_w, doc_h);
-                    frame.render_widget(Clear, doc_area);
-                    let doc_widget = Paragraph::new(doc.clone())
-                        .block(Block::default().borders(Borders::ALL))
-                        .style(Style::default().fg(Color::DarkGray));
-                    frame.render_widget(doc_widget, doc_area);
-                }
-            }
-        }
-    }
-}
+// ── Context view ──────────────────────────────────────────────────────────────
 
 fn render_context_view(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     let title = format!(" Context: {} ", vm.loki_context_labels);
@@ -430,278 +388,4 @@ fn render_context_view(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     let mut table_state = TableState::default();
     table_state.select(Some(vm.loki_context_highlight_index));
     frame.render_stateful_widget(table, area, &mut table_state);
-}
-
-// ── Unit tests ──────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use shared::LokiDiagnosticView;
-
-    fn plain_text(line: &Line) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    /// Check whether the span covering `byte_pos` has the UNDERLINED modifier.
-    fn has_underline(line: &Line, byte_pos: usize) -> bool {
-        let mut offset = 0;
-        for span in &line.spans {
-            let len = span.content.len();
-            if byte_pos >= offset && byte_pos < offset + len {
-                return span.style.add_modifier.contains(Modifier::UNDERLINED);
-            }
-            offset += len;
-        }
-        false
-    }
-
-    /// Return the underline color of the span covering `byte_pos`.
-    fn underline_color_at(line: &Line, byte_pos: usize) -> Option<Color> {
-        let mut offset = 0;
-        for span in &line.spans {
-            let len = span.content.len();
-            if byte_pos >= offset && byte_pos < offset + len {
-                return span.style.underline_color;
-            }
-            offset += len;
-        }
-        None
-    }
-
-    // ── build_query_line_with_diagnostics ────────────────────────────────────
-
-    #[test]
-    fn no_diagnostics_no_underline() {
-        let line = build_query_line_with_diagnostics("rate", 4, &[]);
-        assert!(!has_underline(&line, 0));
-        assert!(!has_underline(&line, 3));
-    }
-
-    #[test]
-    fn error_diagnostic_red_underline() {
-        let diag = LokiDiagnosticView {
-            severity: "error".into(),
-            message: "unexpected token".into(),
-            start_byte: 0,
-            end_byte: 4,
-        };
-        let line = build_query_line_with_diagnostics("rate", 4, &[diag]);
-        assert!(has_underline(&line, 0));
-        assert!(has_underline(&line, 3));
-        assert_eq!(underline_color_at(&line, 0), Some(Color::Red));
-    }
-
-    #[test]
-    fn warning_diagnostic_yellow_underline() {
-        let query = r#"{job="app"}"#;
-        let diag = LokiDiagnosticView {
-            severity: "warning".into(),
-            message: "unused label".into(),
-            start_byte: 1,
-            end_byte: 4,
-        };
-        let line = build_query_line_with_diagnostics(query, query.len(), &[diag]);
-        assert!(!has_underline(&line, 0)); // '{' — no diagnostic
-        assert!(has_underline(&line, 1));  // 'j'
-        assert!(has_underline(&line, 3));  // 'b'
-        assert_eq!(underline_color_at(&line, 1), Some(Color::Yellow));
-    }
-
-    #[test]
-    fn multiple_diagnostics_different_spans() {
-        let query = "rate error";
-        let diags = vec![
-            LokiDiagnosticView {
-                severity: "error".into(),
-                message: "err1".into(),
-                start_byte: 0,
-                end_byte: 2,
-            },
-            LokiDiagnosticView {
-                severity: "warning".into(),
-                message: "warn1".into(),
-                start_byte: 5,
-                end_byte: 8,
-            },
-        ];
-        let line = build_query_line_with_diagnostics(query, query.len(), &diags);
-        assert_eq!(underline_color_at(&line, 0), Some(Color::Red));
-        assert_eq!(underline_color_at(&line, 1), Some(Color::Red));
-        assert!(!has_underline(&line, 3)); // between diagnostics
-        assert_eq!(underline_color_at(&line, 5), Some(Color::Yellow));
-        assert_eq!(underline_color_at(&line, 7), Some(Color::Yellow));
-    }
-
-    #[test]
-    fn diagnostics_preserve_query_text() {
-        let query = r#"rate({job="app"}[5m])"#;
-        let diag = LokiDiagnosticView {
-            severity: "error".into(),
-            message: "test".into(),
-            start_byte: 0,
-            end_byte: 4,
-        };
-        for pos in 0..=query.len() {
-            if !query.is_char_boundary(pos) {
-                continue;
-            }
-            let line = build_query_line_with_diagnostics(query, pos, &[diag.clone()]);
-            let text = plain_text(&line);
-            if pos < query.len() {
-                assert_eq!(text, query, "text mismatch at pos={pos}");
-            } else {
-                assert_eq!(text, format!("{query} "), "end cursor at pos={pos}");
-            }
-        }
-    }
-
-    #[test]
-    fn diagnostic_on_cursor_position_composes() {
-        let query = "rate";
-        let diag = LokiDiagnosticView {
-            severity: "error".into(),
-            message: "bad".into(),
-            start_byte: 0,
-            end_byte: 4,
-        };
-        // Cursor at byte 2 (inside the diagnostic span)
-        let line = build_query_line_with_diagnostics(query, 2, &[diag]);
-        assert_eq!(plain_text(&line), "rate");
-        // The cursor character should still have underline
-        assert!(has_underline(&line, 2));
-    }
-
-    // ── build_info_line ─────────────────────────────────────────────────────
-
-    #[test]
-    fn info_line_cursor_inside_diagnostic() {
-        let vm = ViewModel {
-            loki_diagnostics: vec![
-                LokiDiagnosticView {
-                    severity: "error".into(),
-                    message: "first error".into(),
-                    start_byte: 0,
-                    end_byte: 3,
-                },
-                LokiDiagnosticView {
-                    severity: "warning".into(),
-                    message: "second warning".into(),
-                    start_byte: 5,
-                    end_byte: 8,
-                },
-            ],
-            loki_cursor_pos: 6, // inside second diagnostic
-            ..Default::default()
-        };
-        let line = build_info_line(&vm, 80);
-        let text = plain_text(&line);
-        assert!(text.contains("second warning"), "got: {text}");
-        assert!(!text.contains("first error"), "got: {text}");
-    }
-
-    #[test]
-    fn info_line_falls_back_to_first_diagnostic() {
-        let vm = ViewModel {
-            loki_diagnostics: vec![
-                LokiDiagnosticView {
-                    severity: "error".into(),
-                    message: "first error".into(),
-                    start_byte: 0,
-                    end_byte: 3,
-                },
-                LokiDiagnosticView {
-                    severity: "warning".into(),
-                    message: "second warning".into(),
-                    start_byte: 5,
-                    end_byte: 8,
-                },
-            ],
-            loki_cursor_pos: 4, // not inside any diagnostic
-            ..Default::default()
-        };
-        let line = build_info_line(&vm, 80);
-        let text = plain_text(&line);
-        assert!(text.contains("first error"), "got: {text}");
-    }
-
-    #[test]
-    fn info_line_narrow_terminal_truncates() {
-        let vm = ViewModel {
-            loki_diagnostics: vec![LokiDiagnosticView {
-                severity: "error".into(),
-                message: "this is a very long error message that should be truncated".into(),
-                start_byte: 0,
-                end_byte: 5,
-            }],
-            loki_cursor_pos: 0,
-            ..Default::default()
-        };
-        let line = build_info_line(&vm, 20);
-        let text = plain_text(&line);
-        assert!(text.contains('\u{2026}'), "expected ellipsis, got: {text}");
-        assert!(text.chars().count() <= 20, "too wide: {}", text.chars().count());
-    }
-
-    #[test]
-    fn info_line_multiple_diagnostics_shows_count() {
-        let vm = ViewModel {
-            loki_diagnostics: vec![
-                LokiDiagnosticView {
-                    severity: "error".into(),
-                    message: "err".into(),
-                    start_byte: 0,
-                    end_byte: 2,
-                },
-                LokiDiagnosticView {
-                    severity: "warning".into(),
-                    message: "warn".into(),
-                    start_byte: 5,
-                    end_byte: 8,
-                },
-            ],
-            loki_cursor_pos: 0,
-            ..Default::default()
-        };
-        let line = build_info_line(&vm, 80);
-        let text = plain_text(&line);
-        assert!(text.contains("[2]"), "expected count badge, got: {text}");
-    }
-
-    #[test]
-    fn info_line_single_diagnostic_no_count() {
-        let vm = ViewModel {
-            loki_diagnostics: vec![LokiDiagnosticView {
-                severity: "error".into(),
-                message: "only one".into(),
-                start_byte: 0,
-                end_byte: 3,
-            }],
-            loki_cursor_pos: 0,
-            ..Default::default()
-        };
-        let line = build_info_line(&vm, 80);
-        let text = plain_text(&line);
-        assert!(!text.contains('['), "unexpected count badge, got: {text}");
-    }
-
-    #[test]
-    fn info_line_type_context_with_diagnostic() {
-        let vm = ViewModel {
-            loki_type_context: Some("log stream".into()),
-            loki_diagnostics: vec![LokiDiagnosticView {
-                severity: "error".into(),
-                message: "parse error".into(),
-                start_byte: 0,
-                end_byte: 3,
-            }],
-            loki_cursor_pos: 0,
-            ..Default::default()
-        };
-        let line = build_info_line(&vm, 80);
-        let text = plain_text(&line);
-        assert!(text.contains("log stream"), "got: {text}");
-        assert!(text.contains("parse error"), "got: {text}");
-        assert!(text.contains('\u{2502}'), "expected separator, got: {text}");
-    }
 }

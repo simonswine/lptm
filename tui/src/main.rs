@@ -29,6 +29,7 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use shared::{Event, HistoryEntryView, PyroscopeSubScreenView, ScreenView, ViewModel};
+use tui_textarea;
 use tokio::{sync::mpsc, time::Instant};
 
 use crate::core::AppCore;
@@ -262,9 +263,22 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
     let (tempo_tx, mut tempo_rx) = mpsc::unbounded_channel::<TempoMsg>();
     let (loki_tx, mut loki_rx) = mpsc::unbounded_channel::<LokiMsg>();
 
+    // Loki LSP + UI state (created on first EnterLoki).
+    let mut loki_ui_state: Option<loki::LokiUiState> = None;
+    let mut loki_lsp: Option<loki::LspClient> = None;
+    let mut loki_lsp_notif_rx: Option<mpsc::UnboundedReceiver<loki::LspNotification>> = None;
+    // Channel carrying fetched label data back to the main loop.
+    let (loki_labels_tx, mut loki_labels_rx) =
+        mpsc::unbounded_channel::<(String, Vec<String>)>();          // (selector, names)
+    let (loki_label_values_tx, mut loki_label_values_rx) =
+        mpsc::unbounded_channel::<(String, String, Vec<String>)>();  // (label, selector, values)
+    // The URI we use for the single Loki query document.
+    let loki_doc_uri = "file:///loki/query.logql";
+
     macro_rules! draw {
-        ($term:expr, $vm:expr) => {{
-            $term.draw(|frame| { ui(frame, $vm); })?;
+        ($term:expr, $vm:expr, $loki_state:expr) => {{
+            let ls: Option<&loki::LokiUiState> = $loki_state;
+            $term.draw(|frame| { ui(frame, $vm, ls); })?;
         }};
     }
 
@@ -318,6 +332,34 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                     }
                 }
             }
+            // Label names fetched from the Loki API — forward to LSP server.
+            Some((selector, names)) = loki_labels_rx.recv() => {
+                if let Some(ref lsp) = loki_lsp {
+                    lsp.push_labels(&selector, names).await;
+                }
+            }
+            // Label values fetched from the Loki API — forward to LSP server.
+            Some((label, selector, values)) = loki_label_values_rx.recv() => {
+                if let Some(ref lsp) = loki_lsp {
+                    lsp.push_label_values(&label, &selector, values).await;
+                }
+            }
+            // LSP notifications from the language server (diagnostics etc.).
+            Some(notif) = async {
+                match loki_lsp_notif_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match notif {
+                    loki::LspNotification::Diagnostics { diagnostics, .. } => {
+                        if let Some(ref mut state) = loki_ui_state {
+                            state.diagnostics = diagnostics.clone();
+                        }
+                        app_core.update(Event::LokiDiagnosticsUpdated(diagnostics));
+                    }
+                }
+            }
             () = async {
                 match debounce_deadline {
                     Some(d) => tokio::time::sleep_until(d).await,
@@ -328,12 +370,13 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                 let vm = app_core.core.view();
                 match vm.screen {
                     ScreenView::LokiMode => {
-                        app_core.update(Event::LokiTriggerCompletions);
+                        // Completions are requested inline on each keystroke via LSP.
                     }
                     _ => {
                         app_core.update(Event::TriggerCompletions);
                     }
                 }
+                drop(vm);
             }
             maybe_event = reader.next() => {
                 let Some(Ok(event)) = maybe_event else { break };
@@ -474,9 +517,25 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                         }
                                                     } else if entry.datasource_type == "loki" {
                                                         app_core.update(Event::EnterLoki);
+                                                        init_loki_state(
+                                                            &mut loki_ui_state,
+                                                            &mut loki_lsp,
+                                                            &mut loki_lsp_notif_rx,
+                                                            loki_doc_uri,
+                                                            &grafana_url,
+                                                            &grafana_token,
+                                                            app_core.core.view().selected_index,
+                                                            &app_core.core.view().datasources,
+                                                            &loki_labels_tx,
+                                                        ).await;
                                                         if !entry.query.is_empty() {
-                                                            for c in entry.query.chars() {
-                                                                app_core.update(Event::LokiQueryInput(c));
+                                                            if let Some(ref mut state) = loki_ui_state {
+                                                                state.textarea = loki::styled_textarea();
+                                                                for c in entry.query.chars() {
+                                                                    state.textarea.insert_char(c);
+                                                                }
+                                                                state.query_dirty = true;
+                                                                app_core.update(Event::LokiQueryChanged(entry.query.clone()));
                                                             }
                                                             let ds_id = app_core.core.view()
                                                                 .datasources
@@ -487,6 +546,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                                 })
                                                                 .map(|d| d.id);
                                                             if let Some(ds_id) = ds_id {
+                                                                if let Some(ref mut state) = loki_ui_state {
+                                                                    state.query_dirty = false;
+                                                                }
                                                                 app_core.update(Event::LokiExecuteQuery);
                                                                 spawn_loki_query(&loki_tx, grafana_url.clone(), ds_id, grafana_token.clone(), entry.query.clone());
                                                             }
@@ -574,6 +636,17 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 app_core.update(Event::EnterTempo);
                                             } else if ds.ds_type == "loki" {
                                                 app_core.update(Event::EnterLoki);
+                                                init_loki_state(
+                                                    &mut loki_ui_state,
+                                                    &mut loki_lsp,
+                                                    &mut loki_lsp_notif_rx,
+                                                    loki_doc_uri,
+                                                    &grafana_url,
+                                                    &grafana_token,
+                                                    app_core.core.view().selected_index,
+                                                    &app_core.core.view().datasources,
+                                                    &loki_labels_tx,
+                                                ).await;
                                             } else {
                                                 history_pos = None;
                                                 let ds_name = ds.name.clone();
@@ -1158,11 +1231,19 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                             ScreenView::LokiMode => {
                                 let vm2 = app_core.core.view();
                                 let context_open = vm2.loki_context_open;
-                                let has_completions = !vm2.loki_completion_items.is_empty();
+                                let has_results = !vm2.loki_results.is_empty();
                                 drop(vm2);
 
+                                let has_completions = loki_ui_state
+                                    .as_ref()
+                                    .map(|s| !s.completions.is_empty() && !s.completion_dismissed)
+                                    .unwrap_or(false);
+                                let query_dirty = loki_ui_state
+                                    .as_ref()
+                                    .map(|s| s.query_dirty)
+                                    .unwrap_or(true);
+
                                 if context_open {
-                                    // Context view key bindings
                                     match (key.code, key.modifiers) {
                                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
                                         (KeyCode::Esc, _) => {
@@ -1171,24 +1252,54 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         _ => {}
                                     }
                                 } else {
-                                    // Normal query + results view
                                     match (key.code, key.modifiers) {
                                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+
                                         (KeyCode::Esc, _) => {
                                             if has_completions {
-                                                app_core.update(Event::LokiCompletionDismiss);
+                                                if let Some(ref mut s) = loki_ui_state {
+                                                    s.completion_dismissed = true;
+                                                }
                                             } else {
                                                 app_core.update(Event::BackFromLoki);
                                             }
                                         }
+
+                                        // Tab: accept top/selected completion.
                                         (KeyCode::Tab, _) => {
-                                            app_core.update(Event::LokiCompletionAccept);
+                                            if let Some(ref mut s) = loki_ui_state {
+                                                accept_loki_completion(s);
+                                                let text = s.query().to_string();
+                                                app_core.update(Event::LokiQueryChanged(text.clone()));
+                                                // Notify LSP of updated text.
+                                                if let Some(ref lsp) = loki_lsp {
+                                                    lsp.did_change(loki_doc_uri, &text, 0).await;
+                                                }
+                                            }
                                         }
+
                                         (KeyCode::Down, _) if has_completions => {
-                                            app_core.update(Event::LokiCompletionNext);
+                                            if let Some(ref mut s) = loki_ui_state {
+                                                let len = s.completions.len();
+                                                s.completion_index = Some(
+                                                    match s.completion_index {
+                                                        None => 0,
+                                                        Some(i) => (i + 1) % len,
+                                                    },
+                                                );
+                                            }
                                         }
                                         (KeyCode::Up, _) if has_completions => {
-                                            app_core.update(Event::LokiCompletionPrev);
+                                            if let Some(ref mut s) = loki_ui_state {
+                                                let len = s.completions.len();
+                                                s.completion_index = Some(
+                                                    match s.completion_index {
+                                                        None => len - 1,
+                                                        Some(0) => len - 1,
+                                                        Some(i) => i - 1,
+                                                    },
+                                                );
+                                            }
                                         }
                                         (KeyCode::Down, _) => {
                                             app_core.update(Event::LokiSelectNextRow);
@@ -1196,18 +1307,18 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         (KeyCode::Up, _) => {
                                             app_core.update(Event::LokiSelectPrevRow);
                                         }
+
                                         (KeyCode::Enter, _) => {
-                                            let vm2 = app_core.core.view();
-                                            let has_results = !vm2.loki_results.is_empty();
-                                            let query_dirty = vm2.loki_query_dirty;
-                                            let query_empty = vm2.loki_query.trim().is_empty();
-                                            drop(vm2);
+                                            let query = loki_ui_state
+                                                .as_ref()
+                                                .map(|s| s.query().to_string())
+                                                .unwrap_or_default();
+                                            let query_empty = query.trim().is_empty();
 
                                             if has_results && !query_dirty {
-                                                // Open context for selected row
+                                                // Open context for the selected row.
                                                 let vm2 = app_core.core.view();
                                                 let selected_row = vm2.loki_selected_row;
-                                                // Find the selected entry's timestamp_ns and labels
                                                 let mut entry_info = None;
                                                 let mut flat_idx = 0;
                                                 for stream in &vm2.loki_results {
@@ -1221,12 +1332,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                         }
                                                         flat_idx += 1;
                                                     }
-                                                    if entry_info.is_some() {
-                                                        break;
-                                                    }
+                                                    if entry_info.is_some() { break; }
                                                 }
-                                                let ds_id = vm2
-                                                    .datasources
+                                                let ds_id = vm2.datasources
                                                     .get(vm2.selected_index)
                                                     .map(|d| d.id);
                                                 drop(vm2);
@@ -1245,15 +1353,12 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                     );
                                                 }
                                             } else if !query_empty {
-                                                // Execute query
+                                                // Execute query.
                                                 let vm2 = app_core.core.view();
-                                                let ds_id = vm2
-                                                    .datasources
+                                                let ds_id = vm2.datasources
                                                     .get(vm2.selected_index)
                                                     .map(|d| d.id);
-                                                let query = vm2.loki_query.clone();
 
-                                                // Record history
                                                 if let Some(ds) = vm2.datasources.get(vm2.selected_index) {
                                                     let is_dup = all_history
                                                         .last()
@@ -1280,43 +1385,77 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 }
                                                 drop(vm2);
 
+                                                if let Some(ref mut s) = loki_ui_state {
+                                                    s.query_dirty = false;
+                                                }
+                                                app_core.update(Event::LokiQueryChanged(query.clone()));
                                                 app_core.update(Event::LokiExecuteQuery);
                                                 if let Some(ds_id) = ds_id {
-                                                    spawn_loki_query(&loki_tx, grafana_url.clone(), ds_id, grafana_token.clone(), query);
+                                                    spawn_loki_query(
+                                                        &loki_tx,
+                                                        grafana_url.clone(),
+                                                        ds_id,
+                                                        grafana_token.clone(),
+                                                        query,
+                                                    );
                                                 }
                                             }
                                         }
-                                        (KeyCode::Backspace, _) => {
-                                            app_core.update(Event::LokiQueryBackspace);
-                                            debounce_deadline = Some(Instant::now() + DEBOUNCE);
+
+                                        // All other keys go to tui-textarea.
+                                        _ => {
+                                            if let Some(ref mut s) = loki_ui_state {
+                                                let modified = s.textarea.input(key);
+                                                if modified {
+                                                    s.query_dirty = true;
+                                                    s.completion_dismissed = false;
+                                                    s.completion_index = None;
+                                                    let text = s.query().to_string();
+                                                    app_core.update(Event::LokiQueryChanged(text.clone()));
+                                                    // Notify LSP + request completions.
+                                                    if let Some(ref lsp) = loki_lsp {
+                                                        let col = s.cursor_char_col();
+                                                        lsp.did_change(loki_doc_uri, &text, 0).await;
+                                                        let completions = lsp
+                                                            .completion(loki_doc_uri, 0, col)
+                                                            .await;
+                                                        s.completions = completions;
+                                                        // Trigger label value fetch for value context.
+                                                        maybe_fetch_label_values(
+                                                            &text,
+                                                            col as usize,
+                                                            &grafana_url,
+                                                            &grafana_token,
+                                                            app_core.core.view().selected_index,
+                                                            &app_core.core.view().datasources,
+                                                            &loki_label_values_tx,
+                                                        );
+                                                    }
+                                                }
+                                            }
                                         }
-                                        (KeyCode::Left, _) => {
-                                            app_core.update(Event::LokiQueryCursorLeft);
-                                        }
-                                        (KeyCode::Right, _) => {
-                                            app_core.update(Event::LokiQueryCursorRight);
-                                        }
-                                        (KeyCode::Char(c), _) => {
-                                            app_core.update(Event::LokiQueryInput(c));
-                                            debounce_deadline = Some(Instant::now() + DEBOUNCE);
-                                        }
-                                        _ => {}
                                     }
                                 }
                             }
+                        }
+                        // Loki key events may change local state (completion index, dismissal,
+                        // textarea cursor) without going through Crux, so always redraw.
+                        if matches!(vm.screen, ScreenView::LokiMode) {
+                            let vm2 = app_core.core.view();
+                            draw!(terminal, &vm2, loki_ui_state.as_ref());
                         }
                     }
                     CrosstermEvent::Resize(w, _) => {
                         app_core.update(Event::FlamegraphViewportChars(w.saturating_sub(2) as u64));
                         let vm = app_core.core.view();
-                        draw!(terminal, &vm);
+                        draw!(terminal, &vm, loki_ui_state.as_ref());
                     }
                     _ => {}
                 }
             }
             Some(()) = render_rx.recv() => {
                 let vm = app_core.core.view();
-                draw!(terminal, &vm);
+                draw!(terminal, &vm, loki_ui_state.as_ref());
             }
             _ = {
                 let vm = app_core.core.view();
@@ -1340,13 +1479,128 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                         || vm.heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty())
                         || vm.span_heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty()));
                 if needs_redraw {
-                    draw!(terminal, &vm);
+                    draw!(terminal, &vm, loki_ui_state.as_ref());
                 }
             }
         }
     }
 
     Ok(())
+}
+
+// ── Loki helpers ─────────────────────────────────────────────────────────────
+
+/// Initialize or re-initialize the Loki LSP server and UI state.
+async fn init_loki_state(
+    loki_ui_state: &mut Option<loki::LokiUiState>,
+    loki_lsp: &mut Option<loki::LspClient>,
+    loki_lsp_notif_rx: &mut Option<mpsc::UnboundedReceiver<loki::LspNotification>>,
+    doc_uri: &str,
+    grafana_url: &str,
+    grafana_token: &str,
+    selected_index: usize,
+    datasources: &[shared::DatasourceView],
+    labels_tx: &mpsc::UnboundedSender<(String, Vec<String>)>,
+) {
+    // Only initialize once per session.
+    if loki_lsp.is_some() {
+        // Reset textarea for re-entry.
+        if let Some(ref mut state) = loki_ui_state {
+            state.textarea = loki::styled_textarea();
+            state.completions.clear();
+            state.completion_index = None;
+            state.completion_dismissed = false;
+            state.diagnostics.clear();
+            state.query_dirty = false;
+        }
+        return;
+    }
+
+    match loki::LspClient::new().await {
+        Ok((lsp, notif_rx)) => {
+            lsp.did_open(doc_uri, "").await;
+            *loki_lsp = Some(lsp);
+            *loki_lsp_notif_rx = Some(notif_rx);
+        }
+        Err(e) => {
+            log::warn!("Failed to initialize LogQL LSP: {e}");
+        }
+    }
+
+    *loki_ui_state = Some(loki::LokiUiState::new());
+
+    // Kick off initial label name fetch in the background.
+    if let Some(ds) = datasources.get(selected_index) {
+        let url = grafana_url.to_string();
+        let token = grafana_token.to_string();
+        let ds_id = ds.id;
+        let tx = labels_tx.clone();
+        tokio::spawn(async move {
+            let client = loki::LokiClient::new(url, ds_id, token);
+            match client.fetch_label_names("").await {
+                Ok(names) => { let _ = tx.send((String::new(), names)); }
+                Err(e) => { log::warn!("label fetch failed: {e}"); }
+            }
+        });
+    }
+}
+
+/// Accept the selected (or first) completion into the textarea.
+fn accept_loki_completion(state: &mut loki::LokiUiState) {
+    let idx = state.completion_index.unwrap_or(0);
+    if let Some(item) = state.completions.get(idx) {
+        // Apply the LSP text edit: replace [replace_start_char..replace_end_char] with insert_text.
+        let line = state.textarea.lines().first().cloned().unwrap_or_default();
+        let chars: Vec<char> = line.chars().collect();
+        let start = (item.replace_start_char as usize).min(chars.len());
+        let end = (item.replace_end_char as usize).min(chars.len());
+        let new_line: String = chars[..start]
+            .iter()
+            .chain(item.insert_text.chars().collect::<Vec<_>>().iter())
+            .chain(chars[end..].iter())
+            .collect();
+        let new_col = start + item.insert_text.chars().count();
+        state.textarea = loki::styled_textarea();
+        for c in new_line.chars() {
+            state.textarea.insert_char(c);
+        }
+        use tui_textarea::CursorMove;
+        state.textarea.move_cursor(CursorMove::Jump(0, new_col as u16));
+        state.completions.clear();
+        state.completion_index = None;
+        state.completion_dismissed = false;
+    }
+}
+
+/// If the cursor is in a label-value context, spawn a background fetch for
+/// the values so the LSP server can offer them in subsequent completions.
+fn maybe_fetch_label_values(
+    text: &str,
+    cursor_char: usize,
+    grafana_url: &str,
+    grafana_token: &str,
+    selected_index: usize,
+    datasources: &[shared::DatasourceView],
+    tx: &mpsc::UnboundedSender<(String, String, Vec<String>)>,
+) {
+    use logql_core::completions::{detect_cursor_context, CursorContext};
+    let ctx = detect_cursor_context(text, cursor_char);
+    if let CursorContext::LabelValue { label, selector, .. } = ctx {
+        if label.is_empty() { return; }
+        if let Some(ds) = datasources.get(selected_index) {
+            let url = grafana_url.to_string();
+            let token = grafana_token.to_string();
+            let ds_id = ds.id;
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let client = loki::LokiClient::new(url, ds_id, token);
+                match client.fetch_label_values(&label, &selector).await {
+                    Ok(values) => { let _ = tx.send((label, selector, values)); }
+                    Err(e) => { log::warn!("label values fetch failed: {e}"); }
+                }
+            });
+        }
+    }
 }
 
 fn blink_on() -> bool {
@@ -1357,7 +1611,7 @@ fn blink_on() -> bool {
         < 500
 }
 
-fn ui(frame: &mut Frame, vm: &ViewModel) {
+fn ui(frame: &mut Frame, vm: &ViewModel, loki_state: Option<&loki::LokiUiState>) {
     let area = frame.area();
 
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
@@ -1375,12 +1629,8 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
         ScreenView::LokiMode => {
             if vm.loki_context_open {
                 "Ctrl+C: Quit  Esc: Back to results"
-            } else if !vm.loki_completion_items.is_empty() {
-                "Ctrl+C: Quit  Esc: Dismiss  Tab: Accept  ↑/↓: Select  Enter: Execute"
-            } else if !vm.loki_results.is_empty() && !vm.loki_query_dirty {
-                "Ctrl+C: Quit  Esc: Back  ↑/↓: Navigate  Enter: Context  Tab: Complete"
             } else {
-                "Ctrl+C: Quit  Esc: Back  Enter: Execute  Tab: Complete  ←/→: Cursor  ↑/↓: Navigate"
+                "Ctrl+C: Quit  Esc: Back/Dismiss  Tab: Complete  ↑/↓: Select/Navigate  Enter: Execute/Context"
             }
         }
         ScreenView::PyroscopeMode => match vm.pyroscope_sub_screen {
@@ -1444,7 +1694,9 @@ fn ui(frame: &mut Frame, vm: &ViewModel) {
             let split =
                 Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(outer[0]);
             render_datasource_bar(frame, vm, split[0]);
-            loki::render_loki_mode(frame, vm, split[1]);
+            if let Some(state) = loki_state {
+                loki::render_loki_mode(frame, vm, split[1], state);
+            }
         }
     }
 }

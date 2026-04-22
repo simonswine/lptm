@@ -1,6 +1,7 @@
 mod client;
-mod highlight;
+pub mod lsp;
 mod ui;
 
 pub use client::LokiClient;
-pub use ui::render_loki_mode;
+pub use lsp::{CompletionItem, LspClient, LspNotification};
+pub use ui::{render_loki_mode, styled_textarea, LokiUiState};
