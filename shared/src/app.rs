@@ -15,6 +15,7 @@ use crate::pyroscope::{
     build_flamegraph_view, build_sandwich_view, FlameGraph, FlamegraphNav, FlamegraphView,
     SandwichView,
 };
+use crate::loki::LokiStream;
 use crate::tempo::{TempoSpan, TempoTrace};
 
 #[effect]
@@ -206,6 +207,19 @@ pub enum Event {
     TempoTraceDetailAttrScrollDown,
     TempoTraceDetailAttrScrollUp,
     BackFromTraceDetail,
+
+    // Loki mode
+    EnterLoki,
+    LokiQueryChanged(String),
+    LokiExecuteQuery,
+    LokiResultLoaded(Result<Vec<LokiStream>, String>),
+    LokiSelectNextRow,
+    LokiSelectPrevRow,
+    LokiOpenContext,
+    LokiCloseContext,
+    LokiContextLoaded(Result<(Vec<crate::loki::LokiEntry>, usize), String>),
+    BackFromLoki,
+    LokiDiagnosticsUpdated(Vec<LokiDiagnosticView>),
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -218,6 +232,7 @@ pub enum Screen {
     PyroscopeMode,
     TempoMode,
     TempoTraceDetail,
+    LokiMode,
 }
 
 impl std::fmt::Debug for Screen {
@@ -228,6 +243,7 @@ impl std::fmt::Debug for Screen {
             Screen::PyroscopeMode => write!(f, "PyroscopeMode"),
             Screen::TempoMode => write!(f, "TempoMode"),
             Screen::TempoTraceDetail => write!(f, "TempoTraceDetail"),
+            Screen::LokiMode => write!(f, "LokiMode"),
         }
     }
 }
@@ -340,6 +356,22 @@ pub struct Model {
     pub trace_detail_filter: String,
     pub trace_detail_filter_focused: bool,
     pub trace_detail_attr_scroll: usize,
+
+    // Loki state
+    pub loki_query: String,
+    pub loki_loading: bool,
+    pub loki_error: Option<String>,
+    pub loki_results: Vec<LokiStream>,
+    pub loki_selected_row: usize,
+    pub loki_context_open: bool,
+    pub loki_context_loading: bool,
+    pub loki_context_error: Option<String>,
+    pub loki_context_entries: Vec<crate::loki::LokiEntry>,
+    pub loki_context_highlight_index: usize,
+    pub loki_context_labels: String,
+
+    // Loki diagnostics (pushed from LSP via LokiDiagnosticsUpdated)
+    pub loki_diagnostics: Vec<LokiDiagnosticView>,
 }
 
 // ── ViewModel types ───────────────────────────────────────────────────────────
@@ -371,6 +403,15 @@ pub struct DatasourceView {
     pub is_favourite: bool,
 }
 
+/// A diagnostic (parse error or semantic warning) for the Loki query box.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct LokiDiagnosticView {
+    pub severity: String,
+    pub message: String,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
 pub enum ScreenView {
     #[default]
@@ -379,6 +420,7 @@ pub enum ScreenView {
     PyroscopeMode,
     TempoMode,
     TempoTraceDetail,
+    LokiMode,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -482,6 +524,21 @@ pub struct ViewModel {
     pub trace_detail_filter: String,
     pub trace_detail_filter_focused: bool,
     pub trace_detail_attr_scroll: usize,
+
+    // Loki state
+    pub loki_loading: bool,
+    pub loki_error: Option<String>,
+    pub loki_results: Vec<LokiStream>,
+    pub loki_selected_row: usize,
+    pub loki_context_open: bool,
+    pub loki_context_loading: bool,
+    pub loki_context_error: Option<String>,
+    pub loki_context_entries: Vec<crate::loki::LokiEntry>,
+    pub loki_context_highlight_index: usize,
+    pub loki_context_labels: String,
+
+    // Loki diagnostics (pushed from LSP)
+    pub loki_diagnostics: Vec<LokiDiagnosticView>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -534,6 +591,7 @@ impl App for ExploreTui {
                             || ds.ds_type == "grafana-pyroscope-datasource"
                             || ds.ds_type == "phlare"
                             || ds.ds_type == "tempo"
+                            || ds.ds_type == "loki"
                     })
                     .collect();
                 model.datasource_filter.clear();
@@ -906,6 +964,26 @@ impl App for ExploreTui {
             }
             Event::BackFromTraceDetail => crate::tempo::app::handle_back_from_trace_detail(model),
 
+            // ── Loki ─────────────────────────────────────────────────────────
+
+            Event::EnterLoki => crate::loki::app::handle_enter_loki(model),
+            Event::LokiQueryChanged(q) => crate::loki::app::handle_loki_query_changed(model, q),
+            Event::LokiExecuteQuery => crate::loki::app::handle_loki_execute_query(model),
+            Event::LokiResultLoaded(result) => {
+                crate::loki::app::handle_loki_result_loaded(model, result)
+            }
+            Event::LokiSelectNextRow => crate::loki::app::handle_loki_select_next_row(model),
+            Event::LokiSelectPrevRow => crate::loki::app::handle_loki_select_prev_row(model),
+            Event::LokiOpenContext => crate::loki::app::handle_loki_open_context(model),
+            Event::LokiCloseContext => crate::loki::app::handle_loki_close_context(model),
+            Event::LokiContextLoaded(result) => {
+                crate::loki::app::handle_loki_context_loaded(model, result)
+            }
+            Event::BackFromLoki => crate::loki::app::handle_back_from_loki(model),
+            Event::LokiDiagnosticsUpdated(diags) => {
+                crate::loki::app::handle_loki_diagnostics_updated(model, diags)
+            }
+
             Event::SelectDatasource { uid, name } => {
                 model.datasource_filter.clear();
                 model.datasource_filter_focused = false;
@@ -944,6 +1022,7 @@ impl App for ExploreTui {
             Screen::PyroscopeMode => ScreenView::PyroscopeMode,
             Screen::TempoMode => ScreenView::TempoMode,
             Screen::TempoTraceDetail => ScreenView::TempoTraceDetail,
+            Screen::LokiMode => ScreenView::LokiMode,
         };
 
         let mut indices = filtered_datasource_indices(model);
@@ -1132,6 +1211,17 @@ impl App for ExploreTui {
             trace_detail_filter: model.trace_detail_filter.clone(),
             trace_detail_filter_focused: model.trace_detail_filter_focused,
             trace_detail_attr_scroll: model.trace_detail_attr_scroll,
+            loki_loading: model.loki_loading,
+            loki_error: model.loki_error.clone(),
+            loki_results: model.loki_results.clone(),
+            loki_selected_row: model.loki_selected_row,
+            loki_context_open: model.loki_context_open,
+            loki_context_loading: model.loki_context_loading,
+            loki_context_error: model.loki_context_error.clone(),
+            loki_context_entries: model.loki_context_entries.clone(),
+            loki_context_highlight_index: model.loki_context_highlight_index,
+            loki_context_labels: model.loki_context_labels.clone(),
+            loki_diagnostics: model.loki_diagnostics.clone(),
         }
     }
 }
@@ -1348,6 +1438,8 @@ mod tests {
         core.process_event(Event::SelectNext);
         assert_eq!(core.view().selected_index, 1);
         core.process_event(Event::SelectNext);
+        assert_eq!(core.view().selected_index, 2);
+        core.process_event(Event::SelectNext);
         assert_eq!(core.view().selected_index, 0);
     }
 
@@ -1357,7 +1449,7 @@ mod tests {
         let response = ResponseBuilder::ok().body(make_datasources()).build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
         core.process_event(Event::SelectPrevious);
-        assert_eq!(core.view().selected_index, 1);
+        assert_eq!(core.view().selected_index, 2);
     }
 
     #[test]
@@ -1377,21 +1469,24 @@ mod tests {
         let response = ResponseBuilder::ok().body(make_datasources()).build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
         let vm = core.view();
-        assert_eq!(vm.datasources.len(), 2);
+        assert_eq!(vm.datasources.len(), 3);
         assert_eq!(vm.datasources[0].name, "Prometheus");
         assert!(vm.datasources[0].is_default);
     }
 
     #[test]
-    fn filters_non_prometheus_datasources() {
+    fn filters_supported_datasources() {
         let core = make_core();
         let response = ResponseBuilder::ok().body(make_datasources()).build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
         let vm = core.view();
         assert!(vm.datasources.iter().all(|ds| {
-            ds.ds_type == "prometheus" || ds.ds_type == "pyroscope"
+            ds.ds_type == "prometheus"
+                || ds.ds_type == "pyroscope"
+                || ds.ds_type == "loki"
+                || ds.ds_type == "tempo"
         }));
-        assert!(vm.datasources.iter().all(|ds| ds.name != "Loki"));
+        assert!(vm.datasources.iter().any(|ds| ds.ds_type == "loki"));
     }
 
     #[test]
@@ -1418,7 +1513,8 @@ mod tests {
             ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
 
-        // Select the pyroscope datasource (index 2 after filtering: Prometheus, Prometheus2, Pyroscope)
+        // Select the pyroscope datasource (index 3 after filtering: Prometheus, Loki, Prometheus2, Pyroscope, Phlare)
+        core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
 
@@ -1447,6 +1543,7 @@ mod tests {
         });
         let response = ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
+        core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
         core.process_event(Event::EnterPyroscope { now_unix_ms: 1_000_000 });
@@ -1483,6 +1580,7 @@ mod tests {
         });
         let response = ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
+        core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
         core.process_event(Event::EnterPyroscope { now_unix_ms: 1_000_000 });

@@ -9,6 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 shared = { path = "../shared" }
+logql-core = { path = "../logql-core" }
+logql-lsp = { path = "../logql-lsp" }
+tower-lsp = "0.20"
+tui-textarea = { version = "0.7", features = ["crossterm"] }
 dirs = "5"
 log = "0.4"
 simplelog = "0.12"
@@ -25,3 +29,4 @@ serde_json = "1"
 pyroscope-api = { path = "../pyroscope-api" }
 tokio-tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
 uuid = { version = "1", features = ["v4"] }
+percent-encoding = "2"
