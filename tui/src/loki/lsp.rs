@@ -21,7 +21,6 @@ use logql_lsp::LogQLBackend;
 #[derive(Debug, Clone)]
 pub enum LspNotification {
     Diagnostics {
-        uri: String,
         diagnostics: Vec<LokiDiagnosticView>,
     },
 }
@@ -37,7 +36,8 @@ pub struct LspClient {
     next_id: AtomicI64,
     /// Pending request futures keyed by request id.
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
-    /// Sender for server-push notifications.
+    /// Sender for server-push notifications (kept to hold the channel open).
+    #[allow(dead_code)]
     notif_tx: mpsc::UnboundedSender<LspNotification>,
 }
 
@@ -427,13 +427,8 @@ async fn dispatch_message(
     if let Some(method) = method {
         if method == "textDocument/publishDiagnostics" {
             if let Some(params) = msg.get("params") {
-                let uri = params
-                    .get("uri")
-                    .and_then(|u| u.as_str())
-                    .unwrap_or("")
-                    .to_string();
                 let diags = parse_lsp_diagnostics(params);
-                let _ = notif_tx.send(LspNotification::Diagnostics { uri, diagnostics: diags });
+                let _ = notif_tx.send(LspNotification::Diagnostics { diagnostics: diags });
             }
         }
     }

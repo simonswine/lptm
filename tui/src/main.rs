@@ -215,6 +215,7 @@ async fn main() -> Result<()> {
 
 enum TempoMsg {
     Result(Result<Vec<shared::TempoTrace>, String>),
+    #[allow(dead_code)]
     SpanTraceResult { span_id: String, trace_id: Option<String> },
     SpanTraceBatch(std::collections::HashMap<String, String>),
     TraceDetail(Result<Vec<shared::TempoSpan>, String>),

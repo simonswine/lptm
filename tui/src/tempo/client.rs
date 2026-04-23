@@ -38,6 +38,7 @@ struct UserInfo {
 // Centrifuge server message
 #[derive(Deserialize)]
 struct ServerMsg {
+    #[allow(dead_code)]
     id: Option<u32>,
     push: Option<PushMsg>,
 }

@@ -11,6 +11,7 @@ use super::ui::{format_time_label, heatmap_color};
 
 /// Data captured from a single heatmap cell click.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HeatmapPopup {
     /// Screen position of the click (used to anchor the popup).
     pub screen_x: u16,
@@ -25,6 +26,7 @@ pub struct HeatmapPopup {
     pub count: i32,
 }
 
+#[allow(dead_code)]
 impl HeatmapPopup {
     /// Construct from a click at `(screen_x, screen_y)`, given the layout,
     /// heatmap view, and raw slots.
@@ -217,6 +219,7 @@ impl HeatmapLayout {
 
     /// Map a data-space `(timestamp_ms, value)` exemplar to a terminal cell
     /// `(col, row)` within the graph grid.
+    #[allow(dead_code)]
     pub fn exemplar_to_cell(&self, ts_ms: i64, value: f64, hm: &HeatmapView) -> (u16, u16) {
         (self.ts_to_col(ts_ms, hm), self.value_to_row(value, hm))
     }
@@ -224,6 +227,7 @@ impl HeatmapLayout {
     /// Map a terminal cell `(col, row)` (relative to `graph_x`/`graph_y`)
     /// back to data-space `(timestamp_ms, value)`. Used in tests to verify
     /// the round-trip.
+    #[allow(dead_code)]
     pub fn cell_to_data(&self, col: u16, row: u16, hm: &HeatmapView) -> (i64, f64) {
         let time_span = (hm.end_ms - hm.start_ms).max(1) as f64;
         let y_span = (hm.y_max - hm.y_min).max(f64::EPSILON);
@@ -235,6 +239,7 @@ impl HeatmapLayout {
         (ts_ms, value)
     }
 
+    #[allow(dead_code)]
     /// Map a terminal cell to (slot_index, bucket_index) in the HeatmapView.
     /// Returns `None` if the cell is outside the graph area or the indices are
     /// out of range.
