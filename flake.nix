@@ -1,5 +1,5 @@
 {
-  description = "grafex — Grafana Explore for the terminal";
+  description = "lptm — Logs, Profiles, Traces, Metrics for the terminal";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

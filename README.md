@@ -1,6 +1,6 @@
-# grafex
+# lptm
 
-**grafex** is a terminal UI for exploring Prometheus data through Grafana — the Grafana Explore experience, but in your terminal.
+**lptm** is a terminal UI for exploring Prometheus data through Grafana — the Grafana Explore experience, but in your terminal.
 
 ## Features
 
@@ -18,7 +18,7 @@
 ## Usage
 
 ```sh
-grafex --grafana-url http://localhost:3000 --grafana-token <token>
+lptm --grafana-url http://localhost:3000 --grafana-token <token>
 ```
 
 Or via environment variables:
@@ -26,7 +26,7 @@ Or via environment variables:
 ```sh
 export GRAFANA_URL=http://localhost:3000
 export GRAFANA_TOKEN=<token>
-grafex
+lptm
 ```
 
 ## Key bindings
@@ -54,7 +54,7 @@ grafex
 
 ## Configuration
 
-grafex stores its data in `~/.config/grafex/`:
+lptm stores its data in `~/.config/lptm/`:
 
 | File | Purpose |
 |------|---------|

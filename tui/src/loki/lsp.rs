@@ -107,7 +107,7 @@ impl LspClient {
                 "initialize",
                 json!({
                     "processId": null,
-                    "clientInfo": { "name": "grafex" },
+                    "clientInfo": { "name": "lptm" },
                     "rootUri": null,
                     "capabilities": {
                         "textDocument": {

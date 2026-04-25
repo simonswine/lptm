@@ -271,7 +271,7 @@ impl TempoClient {
         // ── 1. Connect ────────────────────────────────────────────────────────
         ws.send(Message::Text(serde_json::to_string(&json!({
             "id": 1,
-            "connect": { "name": "grafex", "version": "0.1.0" }
+            "connect": { "name": "lptm", "version": "0.1.0" }
         }))?))
         .await?;
 
@@ -412,7 +412,7 @@ impl TempoClient {
         // ── 1. Connect ────────────────────────────────────────────────────────
         ws.send(Message::Text(serde_json::to_string(&json!({
             "id": 1,
-            "connect": { "name": "grafex", "version": "0.1.0" }
+            "connect": { "name": "lptm", "version": "0.1.0" }
         }))?))
         .await?;
         debug!("→ Connect sent");

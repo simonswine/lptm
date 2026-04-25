@@ -35,7 +35,7 @@ use tokio::{sync::mpsc, time::Instant};
 use crate::core::AppCore;
 
 #[derive(Parser, Debug)]
-#[command(name = "grafex", about = "Explore Grafana data from your terminal")]
+#[command(name = "lptm", about = "Explore Grafana data from your terminal")]
 struct Args {
     /// Grafana base URL (e.g. http://localhost:3000)
     #[arg(long, env = "GRAFANA_URL")]
@@ -46,14 +46,14 @@ struct Args {
     grafana_token: String,
 }
 
-/// Initialise file logging under `~/.config/grafex/`.
+/// Initialise file logging under `~/.config/lptm/`.
 /// Errors are non-fatal: the app runs without logging if setup fails.
-fn grafex_dir() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".config").join("grafex"))
+fn lptm_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".config").join("lptm"))
 }
 
 fn setup_logging() {
-    let Some(dir) = grafex_dir() else {
+    let Some(dir) = lptm_dir() else {
         return;
     };
     if std::fs::create_dir_all(&dir).is_err() {
@@ -66,11 +66,11 @@ fn setup_logging() {
 }
 
 fn history_path() -> Option<std::path::PathBuf> {
-    grafex_dir().map(|d| d.join("history"))
+    lptm_dir().map(|d| d.join("history"))
 }
 
 fn favourites_path() -> Option<std::path::PathBuf> {
-    grafex_dir().map(|d| d.join("favourites.json"))
+    lptm_dir().map(|d| d.join("favourites.json"))
 }
 
 fn load_favourites(url_hash: &str) -> Vec<String> {
@@ -203,13 +203,13 @@ async fn main() -> Result<()> {
     setup_logging();
     let args = Args::parse();
 
-    info!("grafex starting – url={}", args.grafana_url);
+    info!("lptm starting – url={}", args.grafana_url);
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stderr(), EnableMouseCapture);
     let result = run(&mut terminal, args).await;
     let _ = execute!(std::io::stderr(), DisableMouseCapture);
     ratatui::restore();
-    info!("grafex exiting");
+    info!("lptm exiting");
     result
 }
 
