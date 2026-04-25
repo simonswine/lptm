@@ -1,3 +1,4 @@
 [workspace]
 members = ["shared", "tui", "pyroscope-api", "tempo-api", "logql-core", "logql-lsp"]
+default-members = ["tui"]
 resolver = "2"
