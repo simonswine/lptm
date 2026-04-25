@@ -1,6 +1,6 @@
 # lptm
 
-**lptm** is a terminal UI for exploring Prometheus data through Grafana — the Grafana Explore experience, but in your terminal.
+**lptm** is a terminal UI for exploring logs, profiles, traces, and metrics through Grafana — the Grafana Explore experience, but in your terminal.
 
 ## Features
 
