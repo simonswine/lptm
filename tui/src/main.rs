@@ -5,6 +5,7 @@ mod loki;
 mod prometheus;
 mod pyroscope;
 mod tempo;
+mod time_range_picker;
 
 use std::collections::HashMap;
 
@@ -388,6 +389,88 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                 match event {
                     CrosstermEvent::Key(key) => {
                         let vm = app_core.core.view();
+
+                        // ── Global time-range picker (intercepts all screens when open) ──
+                        if vm.time_range_picker_open {
+                            match (key.code, key.modifiers) {
+                                (KeyCode::Esc, _) => {
+                                    app_core.update(Event::TimeRangePickerClose);
+                                }
+                                (KeyCode::Enter, _) => {
+                                    let now = now_unix_secs() as i64 * 1000;
+                                    app_core.update(Event::TimeRangePickerCommit { now_unix_ms: now });
+                                    // Respawn queries whose loading flag was just set.
+                                    let vm2 = app_core.core.view();
+                                    match vm2.screen {
+                                        ScreenView::LokiMode => {
+                                            if vm2.loki_loading {
+                                                let ds_id = vm2.datasources.get(vm2.selected_index).map(|d| d.id);
+                                                if let Some(ds_id) = ds_id {
+                                                    let query = if let Some(ref s) = loki_ui_state {
+                                                        s.query()
+                                                    } else {
+                                                        ""
+                                                    }.to_string();
+                                                    spawn_loki_query(&loki_tx, grafana_url.clone(), ds_id, grafana_token.clone(), query, vm2.time_range.clone());
+                                                }
+                                            }
+                                        }
+                                        ScreenView::TempoMode => {
+                                            if vm2.tempo_loading {
+                                                let uid = vm2.datasources.get(vm2.selected_index).map(|d| d.uid.clone());
+                                                if let Some(uid) = uid {
+                                                    spawn_tempo_search(&tempo_tx, grafana_url.clone(), uid, grafana_token.clone(), vm2.tempo_query.clone(), vm2.time_range.clone());
+                                                }
+                                            }
+                                        }
+                                        ScreenView::PyroscopeMode => {
+                                            if vm2.pyroscope_series_loading {
+                                                let ds_id = vm2.datasources.get(vm2.selected_index).map(|d| d.id);
+                                                if let Some(ds_id) = ds_id {
+                                                    spawn_series_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), vm2.time_range.clone(), now);
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                (KeyCode::Tab, _) => {
+                                    app_core.update(Event::TimeRangePickerToggleFocus);
+                                }
+                                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                                    app_core.update(Event::TimeRangePickerNext);
+                                }
+                                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                                    app_core.update(Event::TimeRangePickerPrev);
+                                }
+                                (KeyCode::Left, _) => {
+                                    app_core.update(Event::TimeRangePickerCursorLeft);
+                                }
+                                (KeyCode::Right, _) => {
+                                    app_core.update(Event::TimeRangePickerCursorRight);
+                                }
+                                (KeyCode::Backspace, _) => {
+                                    app_core.update(Event::TimeRangePickerCustomBackspace);
+                                }
+                                // Route printable characters to the From/To field when focused.
+                                // When focus == 0 (preset list), characters are not consumed.
+                                (KeyCode::Char(c), _)
+                                    if vm.time_range_picker_focus != 0
+                                        && (key.modifiers == KeyModifiers::NONE
+                                            || key.modifiers == KeyModifiers::SHIFT) =>
+                                {
+                                    app_core.update(Event::TimeRangePickerCustomInput(c));
+                                }
+                                (KeyCode::Char(' '), _) if vm.time_range_picker_focus != 0 => {
+                                    app_core.update(Event::TimeRangePickerCustomInput(' '));
+                                }
+                                _ => {}
+                            }
+                            // Don't fall through to per-screen handlers while picker is open.
+                            draw!(terminal, &app_core.core.view(), loki_ui_state.as_ref());
+                            continue;
+                        }
+
                         match vm.screen {
                             ScreenView::DatasourceList => {
                                 match (key.code, key.modifiers) {
@@ -487,7 +570,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                                     grafana_token.clone(),
                                                                     entry.profile_type.clone(),
                                                                     entry.service_name.clone(),
-                                                                    vm3.pyroscope_time_range.clone(),
+                                                                    vm3.time_range.clone(),
                                                                     now,
                                                                 );
                                                             } else {
@@ -496,7 +579,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                                     grafana_url.clone(),
                                                                     ds.id,
                                                                     grafana_token.clone(),
-                                                                    vm3.pyroscope_time_range.clone(),
+                                                                    vm3.time_range.clone(),
                                                                     now,
                                                                 );
                                                             }
@@ -517,7 +600,8 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                                 .map(|d| d.uid.clone());
                                                             if let Some(uid) = ds_uid {
                                                                 app_core.update(Event::TempoExecuteQuery);
-                                                                spawn_tempo_search(&tempo_tx, grafana_url.clone(), uid, grafana_token.clone(), entry.query.clone());
+                                                                let time_range = app_core.core.view().time_range.clone();
+                                                                spawn_tempo_search(&tempo_tx, grafana_url.clone(), uid, grafana_token.clone(), entry.query.clone(), time_range);
                                                             }
                                                         }
                                                     } else if entry.datasource_type == "loki" {
@@ -555,7 +639,8 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                                     state.query_dirty = false;
                                                                 }
                                                                 app_core.update(Event::LokiExecuteQuery);
-                                                                spawn_loki_query(&loki_tx, grafana_url.clone(), ds_id, grafana_token.clone(), entry.query.clone());
+                                                                let time_range = app_core.core.view().time_range.clone();
+                                                                spawn_loki_query(&loki_tx, grafana_url.clone(), ds_id, grafana_token.clone(), entry.query.clone(), time_range);
                                                             }
                                                         }
                                                     } else {
@@ -627,14 +712,14 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                             if ds.ds_type == "pyroscope" {
                                                 let now = now_unix_secs() as i64 * 1000;
                                                 app_core.update(Event::EnterPyroscope { now_unix_ms: now });
-                                                // After the event the model has set pyroscope_time_range.
+                                                // After the event the model has set the time_range.
                                                 let vm2 = app_core.core.view();
                                                 spawn_series_fetch(
                                                     &pyroscope_tx,
                                                     grafana_url.clone(),
                                                     ds.id,
                                                     grafana_token.clone(),
-                                                    vm2.pyroscope_time_range.clone(),
+                                                    vm2.time_range.clone(),
                                                     now,
                                                 );
                                             } else if ds.ds_type == "tempo" {
@@ -679,6 +764,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                 match (key.code, key.modifiers) {
                                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                                         break;
+                                    }
+                                    (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+                                        app_core.update(Event::TimeRangePickerOpen { now_unix_ms: now_unix_secs() as i64 * 1000 });
                                     }
                                     (KeyCode::Esc, _) => {
                                         history_pos = None;
@@ -795,41 +883,14 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                             ScreenView::PyroscopeMode => {
                                 match (key.code, key.modifiers) {
                                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                                    (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+                                        app_core.update(Event::TimeRangePickerOpen { now_unix_ms: now_unix_secs() as i64 * 1000 });
+                                    }
                                     _ => {}
                                 }
                                 match vm.pyroscope_sub_screen {
                                     PyroscopeSubScreenView::ServiceList => {
-                                        if vm.pyroscope_time_range_editing {
-                                            match key.code {
-                                                KeyCode::Esc => {
-                                                    app_core.update(Event::PyroscopeTimeRangeAbort);
-                                                }
-                                                KeyCode::Enter => {
-                                                    let now = now_unix_secs() as i64 * 1000;
-                                                    app_core.update(Event::PyroscopeTimeRangeCommit { now_unix_ms: now });
-                                                    // After commit the model has the updated time range.
-                                                    if let Some(ds) = app_core.core.view().datasources.get(app_core.core.view().selected_index) {
-                                                        let vm2 = app_core.core.view();
-                                                        spawn_series_fetch(
-                                                            &pyroscope_tx,
-                                                            grafana_url.clone(),
-                                                            ds.id,
-                                                            grafana_token.clone(),
-                                                            vm2.pyroscope_time_range.clone(),
-                                                            now,
-                                                        );
-                                                    }
-                                                }
-                                                KeyCode::Backspace => {
-                                                    app_core.update(Event::PyroscopeTimeRangeBackspace);
-                                                }
-                                                KeyCode::Char(c) => {
-                                                    app_core.update(Event::PyroscopeTimeRangeInput(c));
-                                                }
-                                                _ => {}
-                                            }
-                                        } else {
-                                            match key.code {
+                                        match key.code {
                                                 KeyCode::Esc => {
                                                     if vm.pyroscope_service_filter_focused
                                                         || !vm.pyroscope_service_filter.is_empty()
@@ -879,9 +940,6 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 KeyCode::Char('k') | KeyCode::Up => {
                                                     app_core.update(Event::PyroscopeSeriesPrev);
                                                 }
-                                                KeyCode::Char('t') => {
-                                                    app_core.update(Event::PyroscopeTimeRangeEdit);
-                                                }
                                                 KeyCode::Char('p') => {
                                                     app_core.update(Event::PyroscopeProfileTypeDropdownOpen);
                                                 }
@@ -893,7 +951,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                         .cloned();
                                                     let ds = vm.datasources.get(vm.selected_index).cloned();
                                                     let ds_id = ds.as_ref().map(|d| d.id);
-                                                    let time_range = vm.pyroscope_time_range.clone();
+                                                    let time_range = vm.time_range.clone();
 
                                                     // Record history for Pyroscope selection.
                                                     if let (Some((ref service, ref pt)), Some(ref ds)) = (&selected, &ds) {
@@ -934,7 +992,6 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 }
                                                 _ => {}
                                             }
-                                        }
                                     }
                                     PyroscopeSubScreenView::Flamegraph
                                     | PyroscopeSubScreenView::Timeline
@@ -1012,7 +1069,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                                 }
                                                                 let vm3 = app_core.core.view();
                                                                 app_core.update(Event::TempoExecuteQuery);
-                                                                spawn_tempo_search(&tempo_tx, grafana_url.clone(), ds.uid, grafana_token.clone(), vm3.tempo_query.clone());
+                                                                spawn_tempo_search(&tempo_tx, grafana_url.clone(), ds.uid, grafana_token.clone(), vm3.tempo_query.clone(), vm3.time_range.clone());
                                                             }
                                                         }
                                                     }
@@ -1027,7 +1084,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                             let profile_id = exemplar.profile_id.clone();
                                                             let profile_type = vm2.pyroscope_selected_profile_type.clone();
                                                             let service = vm2.pyroscope_selected_service.clone();
-                                                            let time_range = vm2.pyroscope_time_range.clone();
+                                                            let time_range = vm2.time_range.clone();
                                                             let now = now_unix_secs() as i64 * 1000;
                                                             app_core.update(Event::ExemplarDetailClose);
                                                             app_core.update(Event::PyroscopeDirectLoad {
@@ -1074,7 +1131,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                             }
                                             (_, KeyCode::Esc) | (_, KeyCode::Char('q')) => {
                                                 let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
-                                                let time_range = vm.pyroscope_time_range.clone();
+                                                let time_range = vm.time_range.clone();
                                                 let now = now_unix_secs() as i64 * 1000;
                                                 app_core.update(Event::BackToServiceList);
                                                 let vm2 = app_core.core.view();
@@ -1096,7 +1153,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
                                                 let service = vm.pyroscope_selected_service.clone();
                                                 let profile_type = vm.pyroscope_selected_profile_type.clone();
-                                                let time_range = vm.pyroscope_time_range.clone();
+                                                let time_range = vm.time_range.clone();
                                                 let now = now_unix_secs() as i64 * 1000;
                                                 app_core.update(Event::PyroscopeSelectView(next));
                                                 let vm2 = app_core.core.view();
@@ -1174,6 +1231,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                             ScreenView::TempoMode => {
                                 match (key.code, key.modifiers) {
                                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                                    (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+                                        app_core.update(Event::TimeRangePickerOpen { now_unix_ms: now_unix_secs() as i64 * 1000 });
+                                    }
                                     (KeyCode::Esc, _) => {
                                         app_core.update(Event::BackFromTempo);
                                     }
@@ -1243,7 +1303,8 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
 
                                             app_core.update(Event::TempoExecuteQuery);
                                             if let Some(uid) = ds_uid {
-                                                spawn_tempo_search(&tempo_tx, grafana_url.clone(), uid, grafana_token.clone(), query);
+                                                let time_range = app_core.core.view().time_range.clone();
+                                                spawn_tempo_search(&tempo_tx, grafana_url.clone(), uid, grafana_token.clone(), query, time_range);
                                             }
                                         }
                                     }
@@ -1327,6 +1388,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                 } else {
                                     match (key.code, key.modifiers) {
                                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                                        (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+                                            app_core.update(Event::TimeRangePickerOpen { now_unix_ms: now_unix_secs() as i64 * 1000 });
+                                        }
 
                                         (KeyCode::Esc, _) => {
                                             if has_completions {
@@ -1464,12 +1528,14 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 app_core.update(Event::LokiQueryChanged(query.clone()));
                                                 app_core.update(Event::LokiExecuteQuery);
                                                 if let Some(ds_id) = ds_id {
+                                                    let time_range = app_core.core.view().time_range.clone();
                                                     spawn_loki_query(
                                                         &loki_tx,
                                                         grafana_url.clone(),
                                                         ds_id,
                                                         grafana_token.clone(),
                                                         query,
+                                                        time_range,
                                                     );
                                                 }
                                             }
@@ -1694,13 +1760,13 @@ fn ui(frame: &mut Frame, vm: &ViewModel, loki_state: Option<&loki::LokiUiState>)
             "Esc: Quit/Clear  j/k: Next/Prev  Enter: Select  f: Fav  /: Filter  Tab: History"
         }
         ScreenView::QueryMode => {
-            "Ctrl+C: Quit  Esc: Back  Enter: Execute  Tab: Complete  ↓/↑: History/Select  ←/→: Cursor"
+            "Ctrl+C: Quit  Ctrl+T: Time Range  Esc: Back  Enter: Execute  Tab: Complete  ↓/↑: History/Select  ←/→: Cursor"
         }
         ScreenView::TempoMode => {
             if vm.tempo_results.is_empty() {
-                "Ctrl+C: Quit  Esc: Back  Enter: Execute  ←/→: Cursor"
+                "Ctrl+C: Quit  Ctrl+T: Time Range  Esc: Back  Enter: Execute  ←/→: Cursor"
             } else {
-                "Ctrl+C: Quit  Esc: Back  Enter: Open Trace  j/k: Navigate  ←/→: Cursor"
+                "Ctrl+C: Quit  Ctrl+T: Time Range  Esc: Back  Enter: Open Trace  j/k: Navigate  ←/→: Cursor"
             }
         }
         ScreenView::TempoTraceDetail if vm.trace_detail_filter_focused => {
@@ -1713,18 +1779,15 @@ fn ui(frame: &mut Frame, vm: &ViewModel, loki_state: Option<&loki::LokiUiState>)
             if vm.loki_context_open {
                 "Ctrl+C: Quit  Esc: Back to results"
             } else {
-                "Ctrl+C: Quit  Esc: Back/Dismiss  Tab: Complete  ↑/↓: Select/Navigate  Enter: Execute/Context"
+                "Ctrl+C: Quit  Ctrl+T: Time Range  Esc: Back/Dismiss  Tab: Complete  ↑/↓: Select/Navigate  Enter: Execute/Context"
             }
         }
         ScreenView::PyroscopeMode => match vm.pyroscope_sub_screen {
             PyroscopeSubScreenView::ServiceList if vm.pyroscope_profile_type_dropdown_open => {
                 "Esc/Enter/p: Close  j/k: Select profile type"
             }
-            PyroscopeSubScreenView::ServiceList if vm.pyroscope_time_range_editing => {
-                "Esc: Cancel  Enter: Apply"
-            }
             PyroscopeSubScreenView::ServiceList => {
-                "Esc: Back/Clear  j/k: Next/Prev  Enter: Select  t: Time Range  p: Profile Type  /: Filter"
+                "Esc: Back/Clear  j/k: Next/Prev  Enter: Select  Ctrl+T: Time Range  p: Profile Type  /: Filter"
             }
             PyroscopeSubScreenView::Flamegraph if vm.sandwich_view.is_some() => {
                 "Esc/s: Exit Sandwich  Tab: Switch View  ←/h: Left  →/l: Right  ↓/j: Callee  ↑/k: Caller"
@@ -1787,6 +1850,11 @@ fn ui(frame: &mut Frame, vm: &ViewModel, loki_state: Option<&loki::LokiUiState>)
                 loki::render_loki_mode(frame, vm, split[1], state);
             }
         }
+    }
+
+    // Time range picker overlays all screens when open.
+    if vm.time_range_picker_open {
+        time_range_picker::render_time_range_picker(frame, vm, outer[0]);
     }
 }
 
@@ -2026,7 +2094,7 @@ fn spawn_series_fetch(
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        let window_ms = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
+        let window_ms = shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client.series(now_ms - window_ms, now_ms).await
             .map_err(|e| e.to_string());
@@ -2046,7 +2114,7 @@ fn spawn_flamegraph_fetch(
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        let window_ms = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
+        let window_ms = shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client
             .select_merge_stacktraces(&profile_type, &service, now_ms - window_ms, now_ms)
@@ -2069,7 +2137,7 @@ fn spawn_flamegraph_by_profile_id(
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        let window_ms = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
+        let window_ms = shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client
             .select_merge_stacktraces_by_profile_id(
@@ -2094,7 +2162,7 @@ fn spawn_timeline_fetch(
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        let window_s = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as f64;
+        let window_s = shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as f64;
         let window_ms = (window_s * 1000.0) as i64;
         let cols = chart_width.max(20) as f64;
         let step_s = (window_s / cols).max(15.0);
@@ -2120,7 +2188,7 @@ fn spawn_heatmap_fetch(
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        let window_s = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as f64;
+        let window_s = shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as f64;
         let window_ms = (window_s * 1000.0) as i64;
         let cols = chart_width.max(20) as f64;
         let step_s = (window_s / cols).max(15.0);
@@ -2146,7 +2214,7 @@ fn spawn_span_heatmap_fetch(
 ) {
     let tx2 = tx.clone();
     tokio::spawn(async move {
-        let window_s = shared::pyroscope::parse_time_range(&time_range).unwrap_or(3600) as f64;
+        let window_s = shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as f64;
         let window_ms = (window_s * 1000.0) as i64;
         let cols = chart_width.max(20) as f64;
         let step_s = (window_s / cols).max(15.0);
@@ -2207,6 +2275,7 @@ fn spawn_tempo_search(
     uid: String,
     token: String,
     query: String,
+    time_range: String,
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
@@ -2214,9 +2283,9 @@ fn spawn_tempo_search(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let start_s = now_s.saturating_sub(3600); // last 1 hour
+        let (start_s, end_s) = shared::time_range::resolve_range_s(&time_range, now_s);
         let client = tempo::TempoClient::new(grafana_url, uid, token);
-        let result = client.search(&query, start_s, now_s).await.map_err(|e| e.to_string());
+        let result = client.search(&query, start_s, end_s).await.map_err(|e| e.to_string());
         let _ = tx.send(TempoMsg::Result(result));
     });
 }
@@ -2229,6 +2298,7 @@ fn spawn_loki_query(
     ds_id: u64,
     token: String,
     query: String,
+    time_range: String,
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
@@ -2236,10 +2306,10 @@ fn spawn_loki_query(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
-        let start_ns = now_ns.saturating_sub(3600 * 1_000_000_000); // last 1 hour
+        let (start_ns, end_ns) = shared::time_range::resolve_range_ns(&time_range, now_ns);
         let client = loki::LokiClient::new(grafana_url, ds_id, token);
         let result = client
-            .query_range(&query, start_ns, now_ns, 1000, "backward")
+            .query_range(&query, start_ns, end_ns, 1000, "backward")
             .await
             .map_err(|e| e.to_string());
         let _ = tx.send(LokiMsg::Result(result));

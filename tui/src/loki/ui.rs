@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame,
 };
-use shared::{LokiDiagnosticView, ViewModel};
+use shared::{time_range::display_label, LokiDiagnosticView, ViewModel};
 use tui_textarea::TextArea;
 
 use super::lsp::CompletionItem;
@@ -96,7 +96,13 @@ pub fn render_loki_mode(
 
     // ── Results area ─────────────────────────────────────────────────────────
     let results_area = split[2];
-    let results_block = Block::default().borders(Borders::ALL).title(" Logs ");
+    let results_block = Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(vec![
+            Span::raw(" Logs — "),
+            Span::styled(display_label(&vm.time_range), Style::default().fg(Color::Yellow)),
+            Span::raw(" "),
+        ]));
 
     if vm.loki_loading {
         frame.render_widget(

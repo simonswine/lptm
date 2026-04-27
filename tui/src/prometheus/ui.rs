@@ -1,11 +1,11 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table},
     Frame,
 };
-use shared::{QueryResultsView, ViewModel};
+use shared::{time_range::display_label, QueryResultsView, ViewModel};
 
 use crate::highlight;
 
@@ -21,7 +21,15 @@ pub fn render_query_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     frame.render_widget(query_text, split[0]);
 
     let results_area = split[1];
-    let results_block = Block::default().borders(Borders::ALL).title(" Results ");
+    // Prometheus instant queries evaluate at "now" regardless of time range;
+    // the range is shown for visual consistency with the other signal screens.
+    let results_block = Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(vec![
+            Span::raw(" Results — "),
+            Span::styled(display_label(&vm.time_range), Style::default().fg(Color::Yellow)),
+            Span::raw(" "),
+        ]));
 
     if vm.query_loading {
         let loading = Paragraph::new("Executing query…").block(results_block);

@@ -8,6 +8,7 @@ use ratatui::{
 };
 use shared::{
     pyroscope::{ProfileUnit, TimelineView},
+    time_range::display_label,
     FlamegraphLevelView, FlamegraphView, PyroscopeSubScreenView, SandwichView, ViewModel,
 };
 
@@ -35,16 +36,8 @@ pub fn render_pyroscope_mode(frame: &mut Frame, vm: &ViewModel, area: Rect, blin
 }
 
 fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let time_range_span = if vm.pyroscope_time_range_editing {
-        Span::styled(
-            format!("{}_", vm.pyroscope_time_range),
-            Style::default().fg(Color::Yellow),
-        )
-    } else {
-        Span::styled(vm.pyroscope_time_range.clone(), Style::default().fg(Color::Yellow))
-    };
-
-    let mut title_spans = vec![Span::raw(" Services — Last ["), time_range_span, Span::raw("]")];
+    let time_range_span = Span::styled(display_label(&vm.time_range), Style::default().fg(Color::Yellow));
+    let mut title_spans = vec![Span::raw(" Services — "), time_range_span];
     if let Some(pt) = vm.pyroscope_profile_types.get(vm.pyroscope_profile_type_index) {
         let n = vm.pyroscope_profile_types.len();
         let idx = vm.pyroscope_profile_type_index + 1;
@@ -410,8 +403,8 @@ fn render_profile_header(frame: &mut Frame, vm: &ViewModel, area: Rect) {
             vm.pyroscope_selected_profile_type.clone(),
             Style::default().fg(Color::Cyan),
         ),
-        Span::raw("  ·  Last "),
-        Span::styled(vm.pyroscope_time_range.clone(), Style::default().fg(Color::Yellow)),
+        Span::raw("  ·  "),
+        Span::styled(display_label(&vm.time_range), Style::default().fg(Color::Yellow)),
     ]);
     frame.render_widget(Paragraph::new(content).block(block), area);
 }

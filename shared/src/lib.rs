@@ -3,6 +3,8 @@ pub mod loki;
 pub mod prometheus;
 pub mod pyroscope;
 pub mod tempo;
+pub mod time_range;
+pub mod time_range_picker;
 
 pub use app::{
     Datasource, DatasourceView, Effect, Event, ExploreTui, HistoryEntryView,
