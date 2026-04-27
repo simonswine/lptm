@@ -869,21 +869,8 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
     })
 }
 
-// ── Time range parser ─────────────────────────────────────────────────────────
-
-/// Parses "15m", "1h", "6h", "24h", "7d" → seconds.
-pub fn parse_time_range(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if let Some(n) = s.strip_suffix('h') {
-        n.parse::<u64>().ok().map(|h| h * 3600)
-    } else if let Some(n) = s.strip_suffix('m') {
-        n.parse::<u64>().ok().map(|m| m * 60)
-    } else if let Some(n) = s.strip_suffix('d') {
-        n.parse::<u64>().ok().map(|d| d * 86400)
-    } else {
-        None
-    }
-}
+/// Re-export for callers that imported from the old location.
+pub use crate::time_range::parse_time_range;
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 

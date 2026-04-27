@@ -25,8 +25,8 @@ pub fn handle_enter_pyroscope(model: &mut Model) -> Command<Effect, Event> {
     model.screen = Screen::PyroscopeMode;
     model.pyroscope_sub_screen = PyroscopeSubScreen::ServiceList;
 
-    if model.pyroscope_time_range.is_empty() {
-        model.pyroscope_time_range = "1h".into();
+    if model.time_range.is_empty() {
+        model.time_range = "1h".into();
     }
 
     model.pyroscope_series_loading = true;
@@ -110,32 +110,6 @@ pub fn handle_pyroscope_series_prev(model: &mut Model) -> Command<Effect, Event>
     render()
 }
 
-pub fn handle_pyroscope_time_range_edit(model: &mut Model) -> Command<Effect, Event> {
-    model.pyroscope_time_range_editing = true;
-    render()
-}
-
-pub fn handle_pyroscope_time_range_input(model: &mut Model, c: char) -> Command<Effect, Event> {
-    model.pyroscope_time_range.push(c);
-    render()
-}
-
-pub fn handle_pyroscope_time_range_backspace(model: &mut Model) -> Command<Effect, Event> {
-    model.pyroscope_time_range.pop();
-    render()
-}
-
-pub fn handle_pyroscope_time_range_commit(model: &mut Model) -> Command<Effect, Event> {
-    model.pyroscope_time_range_editing = false;
-    model.pyroscope_series_loading = true;
-    model.pyroscope_series_error = None;
-    render()
-}
-
-pub fn handle_pyroscope_time_range_abort(model: &mut Model) -> Command<Effect, Event> {
-    model.pyroscope_time_range_editing = false;
-    render()
-}
 
 pub fn handle_pyroscope_profile_type_next(model: &mut Model) -> Command<Effect, Event> {
     let len = model.pyroscope_profile_types.len();
@@ -327,8 +301,8 @@ pub fn handle_pyroscope_direct_load(
     model.datasource_filter.clear();
 
     model.screen = Screen::PyroscopeMode;
-    if model.pyroscope_time_range.is_empty() {
-        model.pyroscope_time_range = "1h".into();
+    if model.time_range.is_empty() {
+        model.time_range = "1h".into();
     }
 
     // Series are not needed — we already know what to load.
@@ -367,7 +341,7 @@ pub fn handle_pyroscope_set_time_range(
     model: &mut Model,
     range: String,
 ) -> Command<Effect, Event> {
-    model.pyroscope_time_range = range;
+    model.time_range = range;
     render()
 }
 

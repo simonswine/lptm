@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
     Frame,
 };
-use shared::{TempoSpan, ViewModel};
+use shared::{time_range::display_label, TempoSpan, ViewModel};
 
 pub fn render_tempo_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     let split = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
@@ -26,7 +26,13 @@ pub fn render_tempo_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     frame.render_widget(Paragraph::new(query_line).block(query_block), split[0]);
 
     // ── Results area ──────────────────────────────────────────────────────────
-    let results_block = Block::default().borders(Borders::ALL).title(" Traces ");
+    let results_block = Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(vec![
+            Span::raw(" Traces — "),
+            Span::styled(display_label(&vm.time_range), Style::default().fg(Color::Yellow)),
+            Span::raw(" "),
+        ]));
 
     if vm.tempo_loading {
         frame.render_widget(

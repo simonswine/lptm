@@ -110,11 +110,17 @@ pub enum Event {
     PyroscopeSeriesPrev,
     PyroscopeSeriesLoaded(Result<Vec<(String, String)>, String>),
 
-    PyroscopeTimeRangeEdit,
-    PyroscopeTimeRangeInput(char),
-    PyroscopeTimeRangeBackspace,
-    PyroscopeTimeRangeCommit { now_unix_ms: i64 },
-    PyroscopeTimeRangeAbort,
+    // Time range picker (global, all 4 signals)
+    TimeRangePickerOpen { now_unix_ms: i64 },
+    TimeRangePickerClose,
+    TimeRangePickerNext,
+    TimeRangePickerPrev,
+    TimeRangePickerToggleFocus,
+    TimeRangePickerCustomInput(char),
+    TimeRangePickerCustomBackspace,
+    TimeRangePickerCursorLeft,
+    TimeRangePickerCursorRight,
+    TimeRangePickerCommit { now_unix_ms: i64 },
 
     PyroscopeProfileTypeNext,
     PyroscopeProfileTypePrev,
@@ -295,10 +301,19 @@ pub struct Model {
     pub metric_names_loading: bool,
     pub label_names_loading: bool,
 
+    // Time range picker (global — applies to all 4 signal screens)
+    pub time_range: String,
+    pub time_range_picker_open: bool,
+    pub time_range_picker_index: usize,
+    /// Focus: 0 = preset list, 1 = absolute From, 2 = absolute To
+    pub time_range_picker_focus: u8,
+    pub time_range_picker_abs_from: String,       // "YYYY-MM-DD HH:MM:SS"
+    pub time_range_picker_abs_to: String,         // "YYYY-MM-DD HH:MM:SS"
+    pub time_range_picker_from_cursor: usize,     // byte cursor within abs_from
+    pub time_range_picker_to_cursor: usize,       // byte cursor within abs_to
+
     // Pyroscope state
     pub pyroscope_sub_screen: PyroscopeSubScreen,
-    pub pyroscope_time_range: String,
-    pub pyroscope_time_range_editing: bool,
     pub pyroscope_series_loading: bool,
     pub pyroscope_series_error: Option<String>,
     pub pyroscope_series: Vec<PyroscopeSeriesItem>,
@@ -465,10 +480,19 @@ pub struct ViewModel {
     pub completion_index: Option<usize>,
     pub completions_loading: bool,
 
+    // Time range picker (global)
+    pub time_range: String,
+    pub time_range_picker_open: bool,
+    pub time_range_picker_index: usize,
+    /// Focus: 0 = preset list, 1 = absolute From, 2 = absolute To
+    pub time_range_picker_focus: u8,
+    pub time_range_picker_abs_from: String,
+    pub time_range_picker_abs_to: String,
+    pub time_range_picker_from_cursor: usize,
+    pub time_range_picker_to_cursor: usize,
+
     // Pyroscope
     pub pyroscope_sub_screen: PyroscopeSubScreenView,
-    pub pyroscope_time_range: String,
-    pub pyroscope_time_range_editing: bool,
     pub pyroscope_series_loading: bool,
     pub pyroscope_series_error: Option<String>,
     pub pyroscope_series: Vec<(String, String)>, // filtered by profile type + service filter
@@ -563,6 +587,9 @@ impl App for ExploreTui {
             Event::Configure { url, token } => {
                 model.grafana_url = url;
                 model.grafana_token = token;
+                if model.time_range.is_empty() {
+                    model.time_range = "1h".to_string();
+                }
                 Command::event(Event::FetchDatasources)
             }
 
@@ -709,20 +736,35 @@ impl App for ExploreTui {
             Event::PyroscopeSeriesPrev => {
                 crate::pyroscope::app::handle_pyroscope_series_prev(model)
             }
-            Event::PyroscopeTimeRangeEdit => {
-                crate::pyroscope::app::handle_pyroscope_time_range_edit(model)
+            Event::TimeRangePickerOpen { now_unix_ms } => {
+                crate::time_range_picker::handle_open(model, now_unix_ms)
             }
-            Event::PyroscopeTimeRangeInput(c) => {
-                crate::pyroscope::app::handle_pyroscope_time_range_input(model, c)
+            Event::TimeRangePickerClose => {
+                crate::time_range_picker::handle_close(model)
             }
-            Event::PyroscopeTimeRangeBackspace => {
-                crate::pyroscope::app::handle_pyroscope_time_range_backspace(model)
+            Event::TimeRangePickerNext => {
+                crate::time_range_picker::handle_next(model)
             }
-            Event::PyroscopeTimeRangeCommit { .. } => {
-                crate::pyroscope::app::handle_pyroscope_time_range_commit(model)
+            Event::TimeRangePickerPrev => {
+                crate::time_range_picker::handle_prev(model)
             }
-            Event::PyroscopeTimeRangeAbort => {
-                crate::pyroscope::app::handle_pyroscope_time_range_abort(model)
+            Event::TimeRangePickerToggleFocus => {
+                crate::time_range_picker::handle_toggle_focus(model)
+            }
+            Event::TimeRangePickerCustomInput(c) => {
+                crate::time_range_picker::handle_custom_input(model, c)
+            }
+            Event::TimeRangePickerCustomBackspace => {
+                crate::time_range_picker::handle_custom_backspace(model)
+            }
+            Event::TimeRangePickerCursorLeft => {
+                crate::time_range_picker::handle_cursor_left(model)
+            }
+            Event::TimeRangePickerCursorRight => {
+                crate::time_range_picker::handle_cursor_right(model)
+            }
+            Event::TimeRangePickerCommit { now_unix_ms } => {
+                crate::time_range_picker::handle_commit(model, now_unix_ms)
             }
             Event::PyroscopeProfileTypeNext => {
                 crate::pyroscope::app::handle_pyroscope_profile_type_next(model)
@@ -1163,9 +1205,15 @@ impl App for ExploreTui {
             completions,
             completion_index: model.completion_index,
             completions_loading,
+            time_range: model.time_range.clone(),
+            time_range_picker_open: model.time_range_picker_open,
+            time_range_picker_index: model.time_range_picker_index,
+            time_range_picker_focus: model.time_range_picker_focus,
+            time_range_picker_abs_from: model.time_range_picker_abs_from.clone(),
+            time_range_picker_abs_to: model.time_range_picker_abs_to.clone(),
+            time_range_picker_from_cursor: model.time_range_picker_from_cursor,
+            time_range_picker_to_cursor: model.time_range_picker_to_cursor,
             pyroscope_sub_screen,
-            pyroscope_time_range: model.pyroscope_time_range.clone(),
-            pyroscope_time_range_editing: model.pyroscope_time_range_editing,
             pyroscope_series_loading: model.pyroscope_series_loading,
             pyroscope_series_error: model.pyroscope_series_error.clone(),
             pyroscope_series,
@@ -1819,7 +1867,7 @@ mod tests {
         assert_eq!(vm.datasources[vm.selected_index].uid, "uid4");
         assert_eq!(vm.datasources[vm.selected_index].id, 4);
         // Time range from history preserved
-        assert_eq!(vm.pyroscope_time_range, "2h");
+        assert_eq!(vm.time_range, "2h");
         // Landed directly on Flamegraph sub-screen
         assert_eq!(vm.pyroscope_sub_screen, PyroscopeSubScreenView::Flamegraph);
         // Flamegraph is loading (TUI will spawn the fetch)

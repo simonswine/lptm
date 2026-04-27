@@ -875,8 +875,8 @@ mod tests {
         let cold_col = (2 * graph_w + n_cols - 1) / n_cols;
         let cold_row = 0usize;
 
-        let hot_cell = buf.get(layout.graph_x + hot_col as u16, layout.graph_y + hot_row as u16);
-        let cold_cell = buf.get(layout.graph_x + cold_col as u16, layout.graph_y + cold_row as u16);
+        let hot_cell = buf.cell((layout.graph_x + hot_col as u16, layout.graph_y + hot_row as u16)).unwrap();
+        let cold_cell = buf.cell((layout.graph_x + cold_col as u16, layout.graph_y + cold_row as u16)).unwrap();
 
         assert_ne!(
             hot_cell.style().bg,
@@ -1061,9 +1061,9 @@ mod tests {
         let one_col     = col_for_slot(1);
         let million_col = col_for_slot(2);
 
-        let zero_cell    = buf.get(layout.graph_x + zero_col as u16,    layout.graph_y);
-        let one_cell     = buf.get(layout.graph_x + one_col as u16,     layout.graph_y);
-        let million_cell = buf.get(layout.graph_x + million_col as u16, layout.graph_y);
+        let zero_cell    = buf.cell((layout.graph_x + zero_col as u16,    layout.graph_y)).unwrap();
+        let one_cell     = buf.cell((layout.graph_x + one_col as u16,     layout.graph_y)).unwrap();
+        let million_cell = buf.cell((layout.graph_x + million_col as u16, layout.graph_y)).unwrap();
 
         assert_eq!(
             zero_cell.style().bg,
