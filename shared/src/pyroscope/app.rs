@@ -17,10 +17,14 @@ pub fn handle_enter_pyroscope(model: &mut Model) -> Command<Effect, Event> {
     if indices.is_empty() {
         return render();
     }
-    // Clamp to valid range; do NOT overwrite selected_index — it remains the
-    // sorted position and is used as such by view() and the TUI.
-    model.selected_index = model.selected_index.min(indices.len() - 1);
+    let clamped = model.selected_index.min(indices.len() - 1);
+    // Capture the raw datasource index before clearing the filter; clearing
+    // changes what sorted_datasource_indices returns, so we must re-map
+    // selected_index to the matching position in the new unfiltered order.
+    let raw_idx = indices[clamped];
     model.datasource_filter.clear();
+    let new_sorted = sorted_datasource_indices(model);
+    model.selected_index = new_sorted.iter().position(|&i| i == raw_idx).unwrap_or(0);
 
     model.screen = Screen::PyroscopeMode;
     model.pyroscope_sub_screen = PyroscopeSubScreen::ServiceList;
