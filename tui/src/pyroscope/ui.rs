@@ -893,7 +893,7 @@ fn render_exemplar_detail(frame: &mut Frame, vm: &ViewModel, area: Rect, unit: P
     lines.push(Line::from(""));
     if has_trace {
         lines.push(Line::from(Span::styled(
-            "Ctrl+T  open trace in Tempo",
+            "t  open trace in Tempo",
             Style::default().fg(Color::Yellow),
         )));
     }

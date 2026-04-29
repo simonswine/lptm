@@ -216,6 +216,8 @@ pub enum Event {
     TempoQueryBackspace,
     TempoQueryCursorLeft,
     TempoQueryCursorRight,
+    TempoQueryCursorHome,
+    TempoQueryCursorEnd,
     TempoExecuteQuery,
     TempoResultLoaded(Result<Vec<TempoTrace>, String>),
     BackFromTempo,
@@ -990,6 +992,8 @@ impl App for ExploreTui {
             Event::TempoQueryBackspace => crate::tempo::app::handle_tempo_query_backspace(model),
             Event::TempoQueryCursorLeft => crate::tempo::app::handle_tempo_cursor_left(model),
             Event::TempoQueryCursorRight => crate::tempo::app::handle_tempo_cursor_right(model),
+            Event::TempoQueryCursorHome => crate::tempo::app::handle_tempo_cursor_home(model),
+            Event::TempoQueryCursorEnd => crate::tempo::app::handle_tempo_cursor_end(model),
             Event::TempoExecuteQuery => crate::tempo::app::handle_tempo_execute_query(model),
             Event::TempoResultLoaded(result) => {
                 crate::tempo::app::handle_tempo_result_loaded(model, result)
