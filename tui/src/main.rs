@@ -1099,7 +1099,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                     {
                                                         let trace_id = vm2.span_trace_lookup.get(&exemplar.span_id).cloned().unwrap_or_default();
                                                         if !trace_id.is_empty() {
-                                                            if let Some(ds) = vm2.tempo_datasources.first().cloned() {
+                                                            if let Some(ds) = vm2.tempo_datasources.get(vm2.tempo_picker_index).cloned() {
                                                                 app_core.update(Event::ExemplarDetailClose);
                                                                 app_core.update(Event::SelectDatasource { uid: ds.uid.clone(), name: ds.name.clone() });
                                                                 app_core.update(Event::EnterTempo);

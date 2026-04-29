@@ -1502,6 +1502,29 @@ mod tests {
         ds
     }
 
+    fn make_datasources_with_two_tempo() -> Vec<Datasource> {
+        vec![
+            Datasource {
+                id: 10,
+                uid: "tempo1".into(),
+                name: "Tempo Primary".into(),
+                ds_type: "tempo".into(),
+                url: "http://tempo1:3200".into(),
+                is_default: false,
+                access: "proxy".into(),
+            },
+            Datasource {
+                id: 11,
+                uid: "tempo2".into(),
+                name: "Tempo Secondary".into(),
+                ds_type: "tempo".into(),
+                url: "http://tempo2:3200".into(),
+                is_default: false,
+                access: "proxy".into(),
+            },
+        ]
+    }
+
     #[test]
     fn configure_triggers_fetch() {
         let core = make_core();
@@ -2065,5 +2088,67 @@ mod tests {
             urls.iter().all(|u| !u.contains("/proxy/1/")),
             "must not query prom1 (id=1), got: {urls:?}"
         );
+    }
+
+    #[test]
+    fn span_heatmap_tempo_picker_index_preserved_after_close() {
+        // Regression test for the bug where opening a trace from the Pyroscope
+        // exemplar detail always used tempo_datasources[0] instead of the
+        // datasource selected via the picker (tempo_picker_index).
+        //
+        // After the user navigates to the second Tempo datasource and confirms,
+        // tempo_picker_index must survive SpanHeatmapCloseTempoPicker so that
+        // the trace-open path can use tempo_datasources.get(tempo_picker_index).
+        let core = make_core();
+        core.process_event(Event::Configure {
+            url: "http://grafana".into(),
+            token: "tok".into(),
+        });
+        let resp = ResponseBuilder::ok()
+            .body(make_datasources_with_two_tempo())
+            .build();
+        core.process_event(Event::DatasourcesLoaded(Ok(resp)));
+
+        // Open the picker — index resets to 0.
+        core.process_event(Event::SpanHeatmapOpenTempoPicker);
+        assert_eq!(core.view().tempo_picker_index, 0);
+        assert_eq!(core.view().tempo_datasources[0].uid, "tempo1");
+
+        // Navigate to the second datasource.
+        core.process_event(Event::SpanHeatmapTempoPickerNext);
+        assert_eq!(core.view().tempo_picker_index, 1);
+
+        // Close the picker (simulates user pressing Enter to confirm).
+        core.process_event(Event::SpanHeatmapCloseTempoPicker);
+
+        // Index must be preserved so the trace-open path picks the right datasource.
+        let vm = core.view();
+        assert_eq!(vm.tempo_picker_index, 1);
+        assert_eq!(
+            vm.tempo_datasources
+                .get(vm.tempo_picker_index)
+                .map(|d| d.uid.as_str()),
+            Some("tempo2"),
+            "trace open should use the datasource the user selected, not the first one"
+        );
+    }
+
+    #[test]
+    fn span_heatmap_tempo_picker_index_wraps() {
+        // Navigating past the last datasource wraps back to 0.
+        let core = make_core();
+        core.process_event(Event::Configure {
+            url: "http://grafana".into(),
+            token: "tok".into(),
+        });
+        let resp = ResponseBuilder::ok()
+            .body(make_datasources_with_two_tempo())
+            .build();
+        core.process_event(Event::DatasourcesLoaded(Ok(resp)));
+
+        core.process_event(Event::SpanHeatmapOpenTempoPicker);
+        core.process_event(Event::SpanHeatmapTempoPickerNext); // index 1
+        core.process_event(Event::SpanHeatmapTempoPickerNext); // wraps to 0
+        assert_eq!(core.view().tempo_picker_index, 0);
     }
 }
