@@ -1707,6 +1707,62 @@ mod tests {
     }
 
     #[test]
+    fn enter_query_with_filter_opens_correct_datasource() {
+        // Regression: when a datasource filter is active, EnterQuery must open
+        // the highlighted (filtered) datasource, not the one at the same index
+        // in the unfiltered list.
+        let core = make_core();
+        core.process_event(Event::Configure {
+            url: "http://localhost:3000".into(),
+            token: "test-token".into(),
+        });
+        // Datasources: [Prometheus(0), Loki(1), Prometheus2(2)]
+        let response = ResponseBuilder::ok().body(make_datasources()).build();
+        core.process_event(Event::DatasourcesLoaded(Ok(response)));
+
+        // Filter to only "Prometheus2" — index 0 in the filtered view maps to
+        // raw index 2, not raw index 0 (Prometheus).
+        core.process_event(Event::DatasourceFilterInput('2'));
+        assert_eq!(core.view().datasources.len(), 1);
+        assert_eq!(core.view().datasources[0].name, "Prometheus2");
+        assert_eq!(core.view().selected_index, 0);
+
+        core.process_event(Event::EnterQuery);
+
+        // After entering query mode the selected datasource must be Prometheus2.
+        let vm = core.view();
+        assert_eq!(vm.screen, ScreenView::QueryMode);
+        assert_eq!(vm.selected_datasource_name.as_deref(), Some("Prometheus2"));
+    }
+
+    #[test]
+    fn enter_pyroscope_with_filter_opens_correct_datasource() {
+        // Regression: same index-remapping bug as enter_query, but for Pyroscope.
+        let core = make_core();
+        core.process_event(Event::Configure {
+            url: "http://localhost:3000".into(),
+            token: "test-token".into(),
+        });
+        // Datasources: [Prometheus(0), Loki(1), Prometheus2(2), Pyroscope(3), Phlare(4)]
+        let response = ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        core.process_event(Event::DatasourcesLoaded(Ok(response)));
+
+        // Filter to show only "Pyroscope" — the single result sits at selected_index 0,
+        // which in the unfiltered list would incorrectly resolve to Prometheus.
+        core.process_event(Event::DatasourceFilterInput('P'));
+        core.process_event(Event::DatasourceFilterInput('y'));
+        core.process_event(Event::DatasourceFilterInput('r'));
+        assert_eq!(core.view().datasources[0].name, "Pyroscope");
+        assert_eq!(core.view().selected_index, 0);
+
+        core.process_event(Event::EnterPyroscope { now_unix_ms: 1_000_000 });
+
+        let vm = core.view();
+        assert_eq!(vm.screen, ScreenView::PyroscopeMode);
+        assert_eq!(vm.selected_datasource_name.as_deref(), Some("Pyroscope"));
+    }
+
+    #[test]
     fn enter_query_switches_screen() {
         let core = make_core();
         core.process_event(Event::Configure {
