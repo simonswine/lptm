@@ -3,7 +3,10 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs},
+    widgets::{
+        Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, ListState,
+        Paragraph, Row, Table, TableState, Tabs,
+    },
     Frame,
 };
 use shared::{
@@ -17,7 +20,9 @@ fn spinner(loading: bool) -> &'static str {
     if !loading {
         return "   ";
     }
-    const FRAMES: &[&str] = &[" ⠋ ", " ⠙ ", " ⠹ ", " ⠸ ", " ⠼ ", " ⠴ ", " ⠦ ", " ⠧ ", " ⠇ ", " ⠏ "];
+    const FRAMES: &[&str] = &[
+        " ⠋ ", " ⠙ ", " ⠹ ", " ⠸ ", " ⠼ ", " ⠴ ", " ⠦ ", " ⠧ ", " ⠇ ", " ⠏ ",
+    ];
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -29,16 +34,28 @@ pub fn render_pyroscope_mode(frame: &mut Frame, vm: &ViewModel, area: Rect, blin
     match vm.pyroscope_sub_screen {
         PyroscopeSubScreenView::ServiceList => render_pyroscope_service_list(frame, vm, area),
         PyroscopeSubScreenView::Flamegraph => render_pyroscope_flamegraph_screen(frame, vm, area),
-        PyroscopeSubScreenView::Timeline => render_pyroscope_timeline_screen(frame, vm, area, blink_on),
-        PyroscopeSubScreenView::ProfileHeatmap => render_pyroscope_heatmap_screen(frame, vm, area, false, blink_on),
-        PyroscopeSubScreenView::SpanHeatmap => render_pyroscope_heatmap_screen(frame, vm, area, true, blink_on),
+        PyroscopeSubScreenView::Timeline => {
+            render_pyroscope_timeline_screen(frame, vm, area, blink_on)
+        }
+        PyroscopeSubScreenView::ProfileHeatmap => {
+            render_pyroscope_heatmap_screen(frame, vm, area, false, blink_on)
+        }
+        PyroscopeSubScreenView::SpanHeatmap => {
+            render_pyroscope_heatmap_screen(frame, vm, area, true, blink_on)
+        }
     }
 }
 
 fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let time_range_span = Span::styled(display_label(&vm.time_range), Style::default().fg(Color::Yellow));
+    let time_range_span = Span::styled(
+        display_label(&vm.time_range),
+        Style::default().fg(Color::Yellow),
+    );
     let mut title_spans = vec![Span::raw(" Services — "), time_range_span];
-    if let Some(pt) = vm.pyroscope_profile_types.get(vm.pyroscope_profile_type_index) {
+    if let Some(pt) = vm
+        .pyroscope_profile_types
+        .get(vm.pyroscope_profile_type_index)
+    {
         let n = vm.pyroscope_profile_types.len();
         let idx = vm.pyroscope_profile_type_index + 1;
         title_spans.push(Span::raw("  ·  "));
@@ -56,10 +73,7 @@ fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) 
     let block = Block::default().borders(Borders::ALL).title(title_line);
 
     if vm.pyroscope_series_loading {
-        frame.render_widget(
-            Paragraph::new("Fetching services…").block(block),
-            area,
-        );
+        frame.render_widget(Paragraph::new("Fetching services…").block(block), area);
         return;
     }
 
@@ -83,7 +97,10 @@ fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) 
     // Filter line (like datasource page)
     let filter_line = if vm.pyroscope_service_filter_focused {
         if vm.pyroscope_service_filter.is_empty() {
-            Line::from(Span::styled("/ type to filter…", Style::default().fg(Color::DarkGray)))
+            Line::from(Span::styled(
+                "/ type to filter…",
+                Style::default().fg(Color::DarkGray),
+            ))
         } else {
             Line::from(vec![
                 Span::styled("/ ", Style::default().fg(Color::DarkGray)),
@@ -92,7 +109,10 @@ fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) 
             ])
         }
     } else if vm.pyroscope_service_filter.is_empty() {
-        Line::from(Span::styled("/ to filter", Style::default().fg(Color::DarkGray)))
+        Line::from(Span::styled(
+            "/ to filter",
+            Style::default().fg(Color::DarkGray),
+        ))
     } else {
         Line::from(vec![
             Span::styled("/ ", Style::default().fg(Color::DarkGray)),
@@ -119,7 +139,9 @@ fn render_pyroscope_service_list(frame: &mut Frame, vm: &ViewModel, area: Rect) 
     }
 
     let header = Row::new([Cell::from("Service").style(
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )]);
 
     let rows: Vec<Row> = vm
@@ -151,7 +173,12 @@ fn render_profile_type_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     if vm.pyroscope_profile_types.is_empty() {
         return;
     }
-    let max_len = vm.pyroscope_profile_types.iter().map(|s| s.len()).max().unwrap_or(10);
+    let max_len = vm
+        .pyroscope_profile_types
+        .iter()
+        .map(|s| s.len())
+        .max()
+        .unwrap_or(10);
     let popup_w = ((max_len as u16) + 4).min(area.width);
     let popup_h = ((vm.pyroscope_profile_types.len() as u16) + 2).min(area.height);
     let popup_area = Rect::new(area.x, area.y, popup_w, popup_h);
@@ -168,7 +195,11 @@ fn render_profile_type_dropdown(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     list_state.select(Some(vm.pyroscope_profile_type_index));
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Profile Type "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Profile Type "),
+        )
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
@@ -188,22 +219,31 @@ fn render_view_tabs(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         PyroscopeSubScreenView::SpanHeatmap => 3,
         _ => 0,
     };
-    let tabs = Tabs::new(vec!["Flamegraph", "Timeline", "Profile Heatmap", "Span Heatmap"])
-        .select(selected)
-        .block(Block::default().borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .style(Style::default().fg(Color::DarkGray));
+    let tabs = Tabs::new(vec![
+        "Flamegraph",
+        "Timeline",
+        "Profile Heatmap",
+        "Span Heatmap",
+    ])
+    .select(selected)
+    .block(Block::default().borders(Borders::ALL))
+    .highlight_style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+    .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(tabs, area);
 }
 
 fn render_pyroscope_flamegraph_screen(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let [info_area, tabs_area, fg_area] =
-        Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)]).areas(area);
+    let [info_area, tabs_area, fg_area] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ])
+    .areas(area);
 
     render_profile_header(frame, vm, info_area);
     render_view_tabs(frame, vm, tabs_area);
@@ -215,7 +255,9 @@ fn render_pyroscope_flamegraph_screen(frame: &mut Frame, vm: &ViewModel, area: R
         return;
     }
 
-    let fg_block = Block::default().borders(Borders::ALL).title(" Icicle Graph ");
+    let fg_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Icicle Graph ");
     if vm.pyroscope_flamegraph_loading {
         frame.render_widget(
             Paragraph::new("Loading icicle graph…").block(fg_block),
@@ -293,7 +335,14 @@ fn render_flamegraph(frame: &mut Frame, fg: &FlamegraphView, block: Block, area:
     let n_visible = fg.levels.len().min(usable_h as usize);
 
     for li in 0..n_visible {
-        render_level_row(frame, &fg.levels[li], w, fg.root_samples, inner.x, inner.y + li as u16);
+        render_level_row(
+            frame,
+            &fg.levels[li],
+            w,
+            fg.root_samples,
+            inner.x,
+            inner.y + li as u16,
+        );
     }
 
     // Status line at the bottom of the inner area.
@@ -383,7 +432,10 @@ fn render_sandwich_view(frame: &mut Frame, sw: &SandwichView, block: Block, area
 
     // Status line
     let pct = sw.target_samples as f64 / sw.root_samples as f64 * 100.0;
-    let status = format!(" {} — {:.1}% of profile  [{}]", sw.target_name, pct, sw.units);
+    let status = format!(
+        " {} — {:.1}% of profile  [{}]",
+        sw.target_name, pct, sw.units
+    );
     let status_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().fg(Color::Cyan)),
@@ -396,7 +448,9 @@ fn render_profile_header(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     let content = Line::from(vec![
         Span::styled(
             vm.pyroscope_selected_service.clone(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  ·  "),
         Span::styled(
@@ -404,14 +458,21 @@ fn render_profile_header(frame: &mut Frame, vm: &ViewModel, area: Rect) {
             Style::default().fg(Color::Cyan),
         ),
         Span::raw("  ·  "),
-        Span::styled(display_label(&vm.time_range), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            display_label(&vm.time_range),
+            Style::default().fg(Color::Yellow),
+        ),
     ]);
     frame.render_widget(Paragraph::new(content).block(block), area);
 }
 
 fn render_pyroscope_timeline_screen(frame: &mut Frame, vm: &ViewModel, area: Rect, blink_on: bool) {
-    let [info_area, tabs_area, chart_area] =
-        Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)]).areas(area);
+    let [info_area, tabs_area, chart_area] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ])
+    .areas(area);
     render_profile_header(frame, vm, info_area);
     render_view_tabs(frame, vm, tabs_area);
 
@@ -432,7 +493,8 @@ fn render_pyroscope_timeline_screen(frame: &mut Frame, vm: &ViewModel, area: Rec
     if let Some(ref tl) = vm.timeline {
         let unit = ProfileUnit::from_profile_type_id(&vm.pyroscope_selected_profile_type);
         let [vis_area, table_area] =
-            Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(chart_area);
+            Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(chart_area);
         let sel_exemplar = tl.exemplars.get(vm.pyroscope_exemplar_index);
         let highlight = sel_exemplar.map(|e| (e.timestamp_ms as f64, e.value as f64));
         render_timeline(frame, tl, block, vis_area, unit, highlight, blink_on);
@@ -459,7 +521,11 @@ fn render_timeline(
     let v_max = tl.value_max.max(1.0);
     let v_min = 0.0_f64.min(tl.value_min);
 
-    let y_labels = [unit.format(v_min), unit.format(v_max / 2.0), unit.format(v_max)];
+    let y_labels = [
+        unit.format(v_min),
+        unit.format(v_max / 2.0),
+        unit.format(v_max),
+    ];
     let mid_ms = (tl.start_ms + tl.end_ms) / 2;
 
     let dataset = Dataset::default()
@@ -472,9 +538,18 @@ fn render_timeline(
         .style(Style::default().fg(Color::DarkGray))
         .bounds([tl.start_ms as f64, tl.end_ms as f64])
         .labels([
-            Span::styled(format_time_label(tl.start_ms), Style::default().fg(Color::DarkGray)),
-            Span::styled(format_time_label(mid_ms), Style::default().fg(Color::DarkGray)),
-            Span::styled(format_time_label(tl.end_ms), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format_time_label(tl.start_ms),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format_time_label(mid_ms),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format_time_label(tl.end_ms),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
 
     let y_axis = Axis::default()
@@ -487,7 +562,10 @@ fn render_timeline(
         ]);
 
     let chart_area = block.inner(area);
-    let chart = Chart::new(vec![dataset]).block(block).x_axis(x_axis).y_axis(y_axis);
+    let chart = Chart::new(vec![dataset])
+        .block(block)
+        .x_axis(x_axis)
+        .y_axis(y_axis);
     frame.render_widget(chart, area);
 
     // Overlay selected exemplar as a blinking 4-dot braille marker.
@@ -534,8 +612,12 @@ fn render_pyroscope_heatmap_screen(
     span: bool,
     blink_on: bool,
 ) {
-    let [info_area, tabs_area, chart_area] =
-        Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)]).areas(area);
+    let [info_area, tabs_area, chart_area] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ])
+    .areas(area);
     render_profile_header(frame, vm, info_area);
     render_view_tabs(frame, vm, tabs_area);
 
@@ -574,13 +656,27 @@ fn render_pyroscope_heatmap_screen(
         let unit = ProfileUnit::from_profile_type_id(&vm.pyroscope_selected_profile_type);
         let exemplars: Vec<_> = hm.exemplars.iter().collect();
         let [vis_area, table_area] =
-            Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(chart_area);
+            Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(chart_area);
         let sel_exemplar = hm.exemplars.get(vm.pyroscope_exemplar_index);
         let hm_highlight = sel_exemplar.map(|e| (e.timestamp_ms, e.value as f64));
         super::heatmap::render_heatmap(frame, hm, block, vis_area, unit, hm_highlight, blink_on);
-        let trace_lookup = if span { Some(&vm.span_trace_lookup) } else { None };
+        let trace_lookup = if span {
+            Some(&vm.span_trace_lookup)
+        } else {
+            None
+        };
         let trace_loading = span && vm.span_trace_loading;
-        render_exemplars(frame, &exemplars, &hm.varying_label_keys, table_area, unit, vm.pyroscope_exemplar_index, trace_lookup, trace_loading);
+        render_exemplars(
+            frame,
+            &exemplars,
+            &hm.varying_label_keys,
+            table_area,
+            unit,
+            vm.pyroscope_exemplar_index,
+            trace_lookup,
+            trace_loading,
+        );
         if span && vm.tempo_datasource_picker_open {
             render_tempo_datasource_picker(frame, vm, chart_area);
         }
@@ -605,9 +701,19 @@ fn render_timeline_exemplars(
     selected_idx: usize,
 ) {
     let exemplars: Vec<_> = tl.exemplars.iter().collect();
-    render_exemplars(frame, &exemplars, &tl.varying_label_keys, area, unit, selected_idx, None, false);
+    render_exemplars(
+        frame,
+        &exemplars,
+        &tl.varying_label_keys,
+        area,
+        unit,
+        selected_idx,
+        None,
+        false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_exemplars(
     frame: &mut Frame,
     exemplars: &[&shared::pyroscope::types::TimelineExemplar],
@@ -623,7 +729,9 @@ pub(super) fn render_exemplars(
 
     if exemplars.is_empty() {
         frame.render_widget(
-            Paragraph::new("No exemplars.").style(Style::default().fg(Color::DarkGray)).block(block),
+            Paragraph::new("No exemplars.")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
             area,
         );
         return;
@@ -631,9 +739,11 @@ pub(super) fn render_exemplars(
 
     let has_profile_id = exemplars.iter().any(|e| !e.profile_id.is_empty());
     let has_span_id = exemplars.iter().any(|e| !e.span_id.is_empty());
-    let has_trace_id = trace_lookup.map_or(false, |m| !m.is_empty());
+    let has_trace_id = trace_lookup.is_some_and(|m| !m.is_empty());
 
-    let bold_cyan = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let bold_cyan = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let mut header_cells = vec![
         Cell::from("Time").style(bold_cyan),
         Cell::from("Value").style(bold_cyan),
@@ -659,14 +769,23 @@ pub(super) fn render_exemplars(
                 Cell::from(unit.format(e.value as f64)),
             ];
             for k in varying_label_keys {
-                let lv = e.labels.iter().find(|(lk, _)| lk == k).map(|(_, lv)| lv.clone()).unwrap_or_default();
+                let lv = e
+                    .labels
+                    .iter()
+                    .find(|(lk, _)| lk == k)
+                    .map(|(_, lv)| lv.clone())
+                    .unwrap_or_default();
                 cells.push(Cell::from(lv));
             }
             if has_profile_id {
-                cells.push(Cell::from(e.profile_id.clone()).style(Style::default().fg(Color::DarkGray)));
+                cells.push(
+                    Cell::from(e.profile_id.clone()).style(Style::default().fg(Color::DarkGray)),
+                );
             }
             if has_span_id {
-                cells.push(Cell::from(e.span_id.clone()).style(Style::default().fg(Color::DarkGray)));
+                cells.push(
+                    Cell::from(e.span_id.clone()).style(Style::default().fg(Color::DarkGray)),
+                );
             }
             if has_trace_id {
                 let trace_id = trace_lookup
@@ -703,17 +822,31 @@ pub(super) fn render_exemplars(
         .header(Row::new(header_cells))
         .block(block)
         .highlight_symbol(">> ")
-        .row_highlight_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD));
+        .row_highlight_style(
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        );
     let mut table_state = TableState::default();
     table_state.select(Some(clamped));
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn render_exemplar_detail(frame: &mut Frame, vm: &ViewModel, area: Rect, unit: ProfileUnit) {
-    let hm = match vm.span_heatmap.as_ref() { Some(h) => h, None => return };
-    let exemplar = match hm.exemplars.get(vm.pyroscope_exemplar_index) { Some(e) => e, None => return };
+    let hm = match vm.span_heatmap.as_ref() {
+        Some(h) => h,
+        None => return,
+    };
+    let exemplar = match hm.exemplars.get(vm.pyroscope_exemplar_index) {
+        Some(e) => e,
+        None => return,
+    };
 
-    let trace_id = vm.span_trace_lookup.get(&exemplar.span_id).cloned().unwrap_or_default();
+    let trace_id = vm
+        .span_trace_lookup
+        .get(&exemplar.span_id)
+        .cloned()
+        .unwrap_or_default();
     let has_trace = !trace_id.is_empty();
     let has_profile = !exemplar.profile_id.is_empty();
 
@@ -759,10 +892,16 @@ fn render_exemplar_detail(frame: &mut Frame, vm: &ViewModel, area: Rect, unit: P
     // Action hints
     lines.push(Line::from(""));
     if has_trace {
-        lines.push(Line::from(Span::styled("Ctrl+T  open trace in Tempo", Style::default().fg(Color::Yellow))));
+        lines.push(Line::from(Span::styled(
+            "Ctrl+T  open trace in Tempo",
+            Style::default().fg(Color::Yellow),
+        )));
     }
     if has_profile {
-        lines.push(Line::from(Span::styled("Ctrl+P  open span profile", Style::default().fg(Color::Yellow))));
+        lines.push(Line::from(Span::styled(
+            "Ctrl+P  open span profile",
+            Style::default().fg(Color::Yellow),
+        )));
     }
 
     let content_w = lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16;
@@ -775,7 +914,11 @@ fn render_exemplar_detail(frame: &mut Frame, vm: &ViewModel, area: Rect, unit: P
     frame.render_widget(Clear, popup_area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" Exemplar Detail "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Exemplar Detail "),
+            )
             .style(Style::default().fg(Color::White)),
         popup_area,
     );
@@ -786,9 +929,18 @@ fn render_tempo_datasource_picker(frame: &mut Frame, vm: &ViewModel, area: Rect)
         return;
     }
 
-    let max_name_len = vm.tempo_datasources.iter().map(|d| d.name.len()).max().unwrap_or(10);
-    let popup_w = (max_name_len as u16 + 6).min(area.width.saturating_sub(4)).max(24);
-    let popup_h = (vm.tempo_datasources.len() as u16 + 2).min(area.height.saturating_sub(4)).max(3);
+    let max_name_len = vm
+        .tempo_datasources
+        .iter()
+        .map(|d| d.name.len())
+        .max()
+        .unwrap_or(10);
+    let popup_w = (max_name_len as u16 + 6)
+        .min(area.width.saturating_sub(4))
+        .max(24);
+    let popup_h = (vm.tempo_datasources.len() as u16 + 2)
+        .min(area.height.saturating_sub(4))
+        .max(3);
     let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
@@ -806,9 +958,17 @@ fn render_tempo_datasource_picker(frame: &mut Frame, vm: &ViewModel, area: Rect)
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Select Tempo Datasource "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Select Tempo Datasource "),
+        )
         .highlight_symbol(">> ")
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
 
     let mut list_state = ListState::default();
     list_state.select(Some(vm.tempo_picker_index));
@@ -921,7 +1081,11 @@ fn get_package_name(label: &str) -> &str {
     }
 
     // dotnet / simple Go: "runtime.goroutine" → "runtime."
-    let without_args = if let Some(p) = label.find('(') { &label[..p] } else { label };
+    let without_args = if let Some(p) = label.find('(') {
+        &label[..p]
+    } else {
+        label
+    };
     if let Some(dot) = without_args.find('.') {
         return &label[..dot + 1];
     }
@@ -935,17 +1099,17 @@ fn frame_color(name: &str) -> Color {
     // Palette from @grafana/flamegraph/FlameGraph/colors.ts → packageColors
     // HSL entries converted to RGB; RGB entries taken directly.
     const PALETTE: [(u8, u8, u8); 24] = [
-        (223, 139,  83), // h:24  s:69%  l:60%
+        (223, 139, 83),  // h:24  s:69%  l:60%
         (224, 173, 108), // h:34  s:65%  l:65%
         (104, 183, 207), // h:194 s:52%  l:61%
-        ( 89, 192, 163), // h:163 s:45%  l:55%
+        (89, 192, 163),  // h:163 s:45%  l:55%
         (104, 151, 202), // h:211 s:48%  l:60%
         (137, 130, 201), // h:246 s:40%  l:65%
         (235, 168, 230), // h:305 s:63%  l:79%
         (255, 225, 117), // h:47  s:100% l:73%
         (183, 219, 171),
         (244, 213, 152),
-        ( 78, 146, 249),
+        (78, 146, 249),
         (249, 186, 143),
         (242, 145, 145),
         (130, 181, 216),
@@ -954,9 +1118,9 @@ fn frame_color(name: &str) -> Color {
         (154, 196, 138),
         (242, 201, 109),
         (101, 197, 219),
-        (249, 147,  78),
-        (234, 100,  96),
-        ( 81, 149, 206),
+        (249, 147, 78),
+        (234, 100, 96),
+        (81, 149, 206),
         (214, 131, 206),
         (128, 110, 183),
     ];

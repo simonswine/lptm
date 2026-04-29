@@ -126,8 +126,7 @@ pub mod app {
     pub fn handle_tempo_select_prev(model: &mut Model) -> Command<Effect, Event> {
         let count = model.tempo_results.len();
         if count > 0 {
-            model.tempo_results_selected =
-                (model.tempo_results_selected + count - 1) % count;
+            model.tempo_results_selected = (model.tempo_results_selected + count - 1) % count;
         }
         render()
     }
@@ -176,8 +175,7 @@ pub mod app {
     pub fn handle_trace_detail_prev(model: &mut Model) -> Command<Effect, Event> {
         let visible = filtered_trace_detail_count(model);
         if visible > 0 {
-            model.trace_detail_selected =
-                (model.trace_detail_selected + visible - 1) % visible;
+            model.trace_detail_selected = (model.trace_detail_selected + visible - 1) % visible;
         }
         model.trace_detail_attr_scroll = 0;
         render()

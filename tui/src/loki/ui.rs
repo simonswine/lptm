@@ -2,7 +2,9 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+    },
     Frame,
 };
 use shared::{time_range::display_label, LokiDiagnosticView, ViewModel};
@@ -51,7 +53,11 @@ impl LokiUiState {
 
     /// Current query text (single line).
     pub fn query(&self) -> &str {
-        self.textarea.lines().first().map(|s| s.as_str()).unwrap_or("")
+        self.textarea
+            .lines()
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("")
     }
 
     /// Cursor column (0-based UTF-16 character offset, suitable for LSP).
@@ -63,12 +69,7 @@ impl LokiUiState {
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
-pub fn render_loki_mode(
-    frame: &mut Frame,
-    vm: &ViewModel,
-    area: Rect,
-    loki_state: &LokiUiState,
-) {
+pub fn render_loki_mode(frame: &mut Frame, vm: &ViewModel, area: Rect, loki_state: &LokiUiState) {
     if vm.loki_context_open {
         render_context_view(frame, vm, area);
         return;
@@ -100,7 +101,10 @@ pub fn render_loki_mode(
         .borders(Borders::ALL)
         .title(Line::from(vec![
             Span::raw(" Logs — "),
-            Span::styled(display_label(&vm.time_range), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                display_label(&vm.time_range),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw(" "),
         ]));
 
@@ -141,7 +145,11 @@ pub fn render_loki_mode(
     }
 
     let header = Row::new(["Timestamp", "Labels", "Log Line"].iter().map(|h| {
-        Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        Cell::from(*h).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
     }));
 
     let rows: Vec<Row> = vm
@@ -151,8 +159,7 @@ pub fn render_loki_mode(
             stream.entries.iter().map(move |entry| {
                 Row::new(vec![
                     Cell::from(entry.timestamp.clone()),
-                    Cell::from(stream.labels.clone())
-                        .style(Style::default().fg(Color::Yellow)),
+                    Cell::from(stream.labels.clone()).style(Style::default().fg(Color::Yellow)),
                     Cell::from(entry.line.clone()),
                 ])
             })
@@ -211,7 +218,13 @@ fn render_completion_popup(
         .map(|d| d.len())
         .max()
         .unwrap_or(0);
-    let content_w = 4 + max_label_len + if max_detail_len > 0 { 2 + max_detail_len } else { 0 };
+    let content_w = 4
+        + max_label_len
+        + if max_detail_len > 0 {
+            2 + max_detail_len
+        } else {
+            0
+        };
     let popup_w = ((content_w as u16) + 4)
         .max(20)
         .min(results_area.x + results_area.width - popup_x);
@@ -250,7 +263,11 @@ fn render_completion_popup(
     list_state.select(loki_state.completion_index);
 
     let list = List::new(list_items)
-        .block(Block::default().borders(Borders::ALL).title(" Completions "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Completions "),
+        )
         .highlight_style(Style::default().fg(Color::Black).bg(Color::White));
 
     frame.render_stateful_widget(list, popup_area, &mut list_state);
@@ -261,9 +278,9 @@ fn render_completion_popup(
             if let Some(ref doc) = item.documentation {
                 let doc_y = popup_area.y + popup_area.height;
                 if doc_y < results_area.y + results_area.height {
-                    let doc_w = popup_w.max(doc.len() as u16 + 4).min(
-                        results_area.x + results_area.width - popup_x,
-                    );
+                    let doc_w = popup_w
+                        .max(doc.len() as u16 + 4)
+                        .min(results_area.x + results_area.width - popup_x);
                     let doc_h = 3u16.min(results_area.y + results_area.height - doc_y);
                     let doc_area = Rect::new(popup_x, doc_y, doc_w, doc_h);
                     frame.render_widget(Clear, doc_area);
@@ -322,7 +339,10 @@ fn build_info_line(diagnostics: &[LokiDiagnosticView], max_width: u16) -> Line<'
         }
 
         if count > 1 {
-            parts.push(Span::styled(count_text, Style::default().fg(Color::DarkGray)));
+            parts.push(Span::styled(
+                count_text,
+                Style::default().fg(Color::DarkGray),
+            ));
         }
     }
 
@@ -336,10 +356,7 @@ fn render_context_view(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     let block = Block::default().borders(Borders::ALL).title(title);
 
     if vm.loki_context_loading {
-        frame.render_widget(
-            Paragraph::new("Loading context\u{2026}").block(block),
-            area,
-        );
+        frame.render_widget(Paragraph::new("Loading context\u{2026}").block(block), area);
         return;
     }
 
@@ -364,7 +381,11 @@ fn render_context_view(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     }
 
     let header = Row::new(["Timestamp", "Log Line"].iter().map(|h| {
-        Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        Cell::from(*h).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
     }));
 
     let rows: Vec<Row> = vm

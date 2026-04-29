@@ -48,7 +48,11 @@ fn tokenize(input: &str) -> Vec<Token> {
                 while pos < len && matches!(bytes[pos], b' ' | b'\t' | b'\r' | b'\n') {
                     pos += 1;
                 }
-                tokens.push(Token { start, end: pos, kind: TokenKind::Whitespace });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind: TokenKind::Whitespace,
+                });
             }
 
             // String literals
@@ -71,7 +75,11 @@ fn tokenize(input: &str) -> Vec<Token> {
                 } else {
                     TokenKind::StringLit
                 };
-                tokens.push(Token { start, end: pos, kind });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind,
+                });
             }
 
             // Numbers (and duration suffixes: ms s m h d w y)
@@ -97,7 +105,11 @@ fn tokenize(input: &str) -> Vec<Token> {
                 } else {
                     TokenKind::Number
                 };
-                tokens.push(Token { start, end: pos, kind });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind,
+                });
             }
 
             // Identifiers and keywords
@@ -116,7 +128,11 @@ fn tokenize(input: &str) -> Vec<Token> {
                 } else {
                     classify_ident(text)
                 };
-                tokens.push(Token { start, end: pos, kind });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind,
+                });
             }
 
             // Operators
@@ -125,45 +141,77 @@ fn tokenize(input: &str) -> Vec<Token> {
                 if pos < len && bytes[pos] == b'~' {
                     pos += 1;
                 }
-                tokens.push(Token { start, end: pos, kind: TokenKind::Operator });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind: TokenKind::Operator,
+                });
             }
             b'!' => {
                 pos += 1;
                 if pos < len && (bytes[pos] == b'=' || bytes[pos] == b'~') {
                     pos += 1;
                 }
-                tokens.push(Token { start, end: pos, kind: TokenKind::Operator });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind: TokenKind::Operator,
+                });
             }
             b'+' | b'-' | b'*' | b'/' | b'%' | b'^' => {
                 pos += 1;
-                tokens.push(Token { start, end: pos, kind: TokenKind::Operator });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind: TokenKind::Operator,
+                });
             }
             b'<' | b'>' => {
                 pos += 1;
                 if pos < len && bytes[pos] == b'=' {
                     pos += 1;
                 }
-                tokens.push(Token { start, end: pos, kind: TokenKind::Operator });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind: TokenKind::Operator,
+                });
             }
             b'@' => {
                 pos += 1;
-                tokens.push(Token { start, end: pos, kind: TokenKind::Operator });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind: TokenKind::Operator,
+                });
             }
 
             // Punctuation – track brace depth for label context
             b'{' => {
                 pos += 1;
                 brace_depth += 1;
-                tokens.push(Token { start, end: pos, kind: TokenKind::Punct });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind: TokenKind::Punct,
+                });
             }
             b'}' => {
                 pos += 1;
                 brace_depth = (brace_depth - 1).max(0);
-                tokens.push(Token { start, end: pos, kind: TokenKind::Punct });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind: TokenKind::Punct,
+                });
             }
             b'(' | b')' | b'[' | b']' | b',' | b';' => {
                 pos += 1;
-                tokens.push(Token { start, end: pos, kind: TokenKind::Punct });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind: TokenKind::Punct,
+                });
             }
 
             // Multi-byte UTF-8 or unrecognised ASCII
@@ -178,7 +226,11 @@ fn tokenize(input: &str) -> Vec<Token> {
                     4
                 };
                 pos = (pos + ch_len).min(len);
-                tokens.push(Token { start, end: pos, kind: TokenKind::Other });
+                tokens.push(Token {
+                    start,
+                    end: pos,
+                    kind: TokenKind::Other,
+                });
             }
         }
     }
@@ -204,9 +256,9 @@ fn classify_ident(text: &str) -> TokenKind {
 
 fn token_style(kind: TokenKind) -> Style {
     match kind {
-        TokenKind::AggregationOp => {
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
-        }
+        TokenKind::AggregationOp => Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
         TokenKind::Function => Style::default().fg(Color::Cyan),
         TokenKind::BinaryKeyword => Style::default().fg(Color::Yellow),
         TokenKind::ModifierKeyword => Style::default().fg(Color::Blue),
@@ -252,7 +304,10 @@ pub fn highlight_query(query: &str, cursor_pos: usize) -> Line<'static> {
             let style = token_style(tok.kind);
 
             if tok.start < cursor_byte {
-                spans.push(Span::styled(query[tok.start..cursor_byte].to_owned(), style));
+                spans.push(Span::styled(
+                    query[tok.start..cursor_byte].to_owned(),
+                    style,
+                ));
             }
 
             // One UTF-8 character at cursor_byte.

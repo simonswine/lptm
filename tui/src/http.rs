@@ -4,8 +4,8 @@ use log::debug;
 pub async fn execute(request: &HttpRequest) -> HttpResult {
     let client = reqwest::Client::new();
 
-    let method = reqwest::Method::from_bytes(request.method.as_bytes())
-        .unwrap_or(reqwest::Method::GET);
+    let method =
+        reqwest::Method::from_bytes(request.method.as_bytes()).unwrap_or(reqwest::Method::GET);
 
     debug!("→ {} {}", request.method, request.url);
     if !request.body.is_empty() {

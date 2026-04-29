@@ -7,11 +7,12 @@ use ratatui::{
 };
 use shared::{
     time_range::PRESETS,
-    time_range_picker::{FOCUS_ABS_FROM, FOCUS_ABS_TO, FOCUS_PRESETS, DATETIME_TEMPLATE},
+    time_range_picker::{DATETIME_TEMPLATE, FOCUS_ABS_FROM, FOCUS_ABS_TO, FOCUS_PRESETS},
     ViewModel,
 };
 
-const TITLE: &str = " Time Range  ↑↓/jk: preset · Tab: From/To · ←/→: cursor · Enter: apply · Esc: cancel ";
+const TITLE: &str =
+    " Time Range  ↑↓/jk: preset · Tab: From/To · ←/→: cursor · Enter: apply · Esc: cancel ";
 
 pub fn render_time_range_picker(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     if !vm.time_range_picker_open {
@@ -38,8 +39,7 @@ pub fn render_time_range_picker(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     ])
     .areas(inner);
 
-    let [from_area, to_area] =
-        Layout::vertical([Constraint::Length(1); 2]).areas(inputs_area);
+    let [from_area, to_area] = Layout::vertical([Constraint::Length(1); 2]).areas(inputs_area);
 
     render_datetime_row(
         frame,

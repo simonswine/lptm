@@ -7,11 +7,10 @@ pub mod time_range;
 pub mod time_range_picker;
 
 pub use app::{
-    Datasource, DatasourceView, Effect, Event, ExploreTui, HistoryEntryView,
-    LokiDiagnosticView, Model, PyroscopeSubScreenView,
-    QueryResultsView, ScreenView, ViewModel,
+    Datasource, DatasourceView, Effect, Event, ExploreTui, HistoryEntryView, LokiDiagnosticView,
+    Model, PyroscopeSubScreenView, QueryResultsView, ScreenView, ViewModel,
 };
-pub use tempo::{TempoSpan, TempoTrace};
-pub use pyroscope::{FlamegraphFrameView, FlamegraphLevelView, FlamegraphView, SandwichView};
 pub use crux_core::Core;
 pub use crux_http;
+pub use pyroscope::{FlamegraphFrameView, FlamegraphLevelView, FlamegraphView, SandwichView};
+pub use tempo::{TempoSpan, TempoTrace};

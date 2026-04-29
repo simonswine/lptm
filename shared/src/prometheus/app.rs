@@ -1,7 +1,10 @@
 use crux_core::{render::render, Command};
 use crux_http::command::Http;
 
-use crate::app::{active_datasource, extract_error_message, sorted_datasource_indices, Effect, Event, Model, Screen};
+use crate::app::{
+    active_datasource, extract_error_message, sorted_datasource_indices, Effect, Event, Model,
+    Screen,
+};
 use crate::prometheus::{
     context::{char_to_byte, compute_completions, detect_context, word_boundary_byte},
     types::{PrometheusData, PrometheusResponse, PrometheusStringListResponse},
@@ -41,7 +44,8 @@ pub fn handle_enter_query(model: &mut Model) -> Command<Effect, Event> {
         return render();
     }
 
-    let ds = active_datasource(model).expect("selected datasource must exist after entering query mode");
+    let ds =
+        active_datasource(model).expect("selected datasource must exist after entering query mode");
     let base = format!("{}/api/datasources/proxy/{}", model.grafana_url, ds.id);
     let token = model.grafana_token.clone();
 
@@ -178,7 +182,10 @@ pub fn handle_label_values_loaded(
             render()
         }
         Err(_) => {
-            model.label_values_cache.entry((label, selector)).or_default();
+            model
+                .label_values_cache
+                .entry((label, selector))
+                .or_default();
             render()
         }
     }
@@ -212,9 +219,11 @@ pub fn handle_completion_prev(model: &mut Model) -> Command<Effect, Event> {
 
 pub fn handle_completion_accept(model: &mut Model) -> Command<Effect, Event> {
     let completions = get_completions(model);
-    let idx = model
-        .completion_index
-        .or(if completions.is_empty() { None } else { Some(0) });
+    let idx = model.completion_index.or(if completions.is_empty() {
+        None
+    } else {
+        Some(0)
+    });
 
     if let Some(i) = idx {
         if let Some(completion) = completions.get(i) {
@@ -363,7 +372,12 @@ fn maybe_label_values_cmd(model: &Model) -> Option<Command<Effect, Event>> {
     let ds_id = active_datasource(model)?.id;
     let ctx = detect_context(&model.query, model.cursor_pos);
 
-    if let CompletionCtx::LabelValue { ref label, ref selector, .. } = ctx {
+    if let CompletionCtx::LabelValue {
+        ref label,
+        ref selector,
+        ..
+    } = ctx
+    {
         let cache_key = (label.clone(), selector.clone());
         if !model.label_values_cache.contains_key(&cache_key) {
             let base = format!(

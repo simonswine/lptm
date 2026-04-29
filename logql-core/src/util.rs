@@ -12,9 +12,7 @@ pub fn word_boundary_byte(s: &str) -> usize {
     let bytes = s.as_bytes();
     let mut i = bytes.len();
     while i > 0
-        && (bytes[i - 1].is_ascii_alphanumeric()
-            || bytes[i - 1] == b'_'
-            || bytes[i - 1] == b':')
+        && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b':')
     {
         i -= 1;
     }

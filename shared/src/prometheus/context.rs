@@ -18,14 +18,24 @@ pub enum CompletionCtx {
     /// `selector` is a Prometheus selector built from the other complete matchers
     /// in the same `{…}` block, e.g. `up{namespace="prod"}`.  Empty when there
     /// are no other complete matchers.
-    LabelValue { label: String, prefix: String, selector: String },
+    LabelValue {
+        label: String,
+        prefix: String,
+        selector: String,
+    },
     /// No useful context (e.g. right after an operator, or empty).
     None,
 }
 
 /// Keywords whose parenthesised argument list contains label names.
-const LABEL_LIST_KEYWORDS: &[&str] =
-    &["by", "without", "on", "ignoring", "group_left", "group_right"];
+const LABEL_LIST_KEYWORDS: &[&str] = &[
+    "by",
+    "without",
+    "on",
+    "ignoring",
+    "group_left",
+    "group_right",
+];
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -37,7 +47,11 @@ pub fn detect_context(query: &str, cursor_pos: usize) -> CompletionCtx {
     // 1. Check for unclosed string inside braces (label value context).
     if let Some((label, prefix)) = find_label_value_context(before) {
         let selector = extract_label_selector(before);
-        return CompletionCtx::LabelValue { label, prefix, selector };
+        return CompletionCtx::LabelValue {
+            label,
+            prefix,
+            selector,
+        };
     }
 
     // 2. Find the current word prefix.
@@ -51,7 +65,7 @@ pub fn detect_context(query: &str, cursor_pos: usize) -> CompletionCtx {
         // (the user is about to open a string value).
         if prefix.is_empty() && word_start > 0 {
             let before_word = before[..word_start].trim_end();
-            if before_word.ends_with(|c: char| c == '=' || c == '~' || c == '!') {
+            if before_word.ends_with(['=', '~', '!']) {
                 return CompletionCtx::None;
             }
         }
@@ -67,7 +81,10 @@ pub fn detect_context(query: &str, cursor_pos: usize) -> CompletionCtx {
     // 5. Label-list paren context: inside `by(…)`, `without(…)`, `on(…)`, etc.
     // No {…} block here, so no selector to extract.
     if in_label_list_paren(before) {
-        return CompletionCtx::LabelName { prefix, selector: String::new() };
+        return CompletionCtx::LabelName {
+            prefix,
+            selector: String::new(),
+        };
     }
 
     // 6. Default: metric name or keyword.
@@ -130,7 +147,11 @@ pub fn compute_completions(
             results
         }
 
-        CompletionCtx::LabelValue { label, prefix, selector } => {
+        CompletionCtx::LabelValue {
+            label,
+            prefix,
+            selector,
+        } => {
             let pl = prefix.to_lowercase();
             let key = (label.clone(), selector.clone());
             let values = label_values_cache
@@ -157,9 +178,7 @@ pub fn word_boundary_byte(s: &str) -> usize {
     let bytes = s.as_bytes();
     let mut i = bytes.len();
     while i > 0
-        && (bytes[i - 1].is_ascii_alphanumeric()
-            || bytes[i - 1] == b'_'
-            || bytes[i - 1] == b':')
+        && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b':')
     {
         i -= 1;
     }
@@ -298,9 +317,7 @@ pub(crate) fn find_label_value_context(before: &str) -> Option<(String, String)>
 
     // Find the label name by scanning backwards from the opening quote.
     let before_quote = &before[..start];
-    let before_op = before_quote
-        .trim_end_matches(|c: char| c == '=' || c == '~' || c == '!')
-        .trim_end();
+    let before_op = before_quote.trim_end_matches(['=', '~', '!']).trim_end();
     let wb = word_boundary_byte(before_op);
     let label = before_op[wb..].to_string();
 
@@ -523,7 +540,13 @@ mod tests {
     fn detect_context_empty_prefix_no_completions() {
         let ctx = detect_context("", 0);
         assert!(matches!(ctx, CompletionCtx::MetricOrKeyword { ref prefix } if prefix.is_empty()));
-        let results = compute_completions(&ctx, &[], &HashMap::<String,Vec<String>>::new(), &HashMap::<(String,String),Vec<String>>::new(), 10);
+        let results = compute_completions(
+            &ctx,
+            &[],
+            &HashMap::<String, Vec<String>>::new(),
+            &HashMap::<(String, String), Vec<String>>::new(),
+            10,
+        );
         assert!(results.is_empty());
     }
 
@@ -543,7 +566,10 @@ mod tests {
         // label name should include it.
         let ctx = detect_context(r#"up{namespace="prod","#, 20);
         match ctx {
-            CompletionCtx::LabelName { ref prefix, ref selector } => {
+            CompletionCtx::LabelName {
+                ref prefix,
+                ref selector,
+            } => {
                 assert!(prefix.is_empty());
                 assert_eq!(selector, r#"up{namespace="prod"}"#);
             }
@@ -557,7 +583,10 @@ mod tests {
         let ctx = detect_context("sum by (job", 11);
         match ctx {
             CompletionCtx::LabelName { ref selector, .. } => {
-                assert!(selector.is_empty(), "expected empty selector in by(), got {selector:?}");
+                assert!(
+                    selector.is_empty(),
+                    "expected empty selector in by(), got {selector:?}"
+                );
             }
             other => panic!("expected LabelName, got {other:?}"),
         }
@@ -581,7 +610,11 @@ mod tests {
         let query = r#"up{namespace="prod",pod=""#;
         let ctx = detect_context(query, query.chars().count());
         match ctx {
-            CompletionCtx::LabelValue { ref label, ref selector, .. } => {
+            CompletionCtx::LabelValue {
+                ref label,
+                ref selector,
+                ..
+            } => {
                 assert_eq!(label, "pod");
                 assert_eq!(selector, r#"up{namespace="prod"}"#);
             }
@@ -657,7 +690,11 @@ mod tests {
     #[test]
     fn detect_context_in_bracket_suppresses_completion() {
         let ctx = detect_context("rate(http_requests_total[5", 25);
-        assert!(matches!(ctx, CompletionCtx::None), "expected None inside [], got {:?}", ctx);
+        assert!(
+            matches!(ctx, CompletionCtx::None),
+            "expected None inside [], got {:?}",
+            ctx
+        );
     }
 
     #[test]
@@ -682,8 +719,16 @@ mod tests {
 
     #[test]
     fn completions_filter_keywords() {
-        let ctx = CompletionCtx::MetricOrKeyword { prefix: "ra".into() };
-        let results = compute_completions(&ctx, &[], &HashMap::<String,Vec<String>>::new(), &HashMap::<(String,String),Vec<String>>::new(), 10);
+        let ctx = CompletionCtx::MetricOrKeyword {
+            prefix: "ra".into(),
+        };
+        let results = compute_completions(
+            &ctx,
+            &[],
+            &HashMap::<String, Vec<String>>::new(),
+            &HashMap::<(String, String), Vec<String>>::new(),
+            10,
+        );
         assert!(results.contains(&"rate".to_string()), "{results:?}");
         assert!(!results.iter().any(|r| !r.starts_with("ra")));
     }
@@ -695,9 +740,20 @@ mod tests {
             "requests_total".to_string(),
             "up".to_string(),
         ];
-        let ctx = CompletionCtx::MetricOrKeyword { prefix: "re".into() };
-        let results = compute_completions(&ctx, &metrics, &HashMap::<String,Vec<String>>::new(), &HashMap::<(String,String),Vec<String>>::new(), 10);
-        assert!(results.contains(&"requests_total".to_string()), "{results:?}");
+        let ctx = CompletionCtx::MetricOrKeyword {
+            prefix: "re".into(),
+        };
+        let results = compute_completions(
+            &ctx,
+            &metrics,
+            &HashMap::<String, Vec<String>>::new(),
+            &HashMap::<(String, String), Vec<String>>::new(),
+            10,
+        );
+        assert!(
+            results.contains(&"requests_total".to_string()),
+            "{results:?}"
+        );
         assert!(!results.contains(&"up".to_string()));
     }
 
@@ -708,8 +764,17 @@ mod tests {
             String::new(),
             vec!["job".to_string(), "instance".to_string(), "env".to_string()],
         );
-        let ctx = CompletionCtx::LabelName { prefix: "j".into(), selector: String::new() };
-        let results = compute_completions(&ctx, &[], &cache, &HashMap::<(String,String),Vec<String>>::new(), 10);
+        let ctx = CompletionCtx::LabelName {
+            prefix: "j".into(),
+            selector: String::new(),
+        };
+        let results = compute_completions(
+            &ctx,
+            &[],
+            &cache,
+            &HashMap::<(String, String), Vec<String>>::new(),
+            10,
+        );
         assert_eq!(results, vec!["job"]);
     }
 
@@ -718,33 +783,63 @@ mod tests {
         // Only the labels cached under the specific selector should be returned.
         let selector = r#"up{namespace="prod"}"#.to_string();
         let mut cache: HashMap<String, Vec<String>> = HashMap::new();
-        cache.insert(String::new(), vec!["job".into(), "instance".into(), "namespace".into()]);
+        cache.insert(
+            String::new(),
+            vec!["job".into(), "instance".into(), "namespace".into()],
+        );
         cache.insert(selector.clone(), vec!["pod".into(), "container".into()]);
 
-        let ctx = CompletionCtx::LabelName { prefix: String::new(), selector: selector.clone() };
-        let results = compute_completions(&ctx, &[], &cache, &HashMap::<(String,String),Vec<String>>::new(), 10);
+        let ctx = CompletionCtx::LabelName {
+            prefix: String::new(),
+            selector: selector.clone(),
+        };
+        let results = compute_completions(
+            &ctx,
+            &[],
+            &cache,
+            &HashMap::<(String, String), Vec<String>>::new(),
+            10,
+        );
         assert_eq!(results, vec!["container", "pod"]);
 
         // Unfiltered context still returns the full list.
-        let ctx_all = CompletionCtx::LabelName { prefix: String::new(), selector: String::new() };
-        let results_all = compute_completions(&ctx_all, &[], &cache, &HashMap::<(String,String),Vec<String>>::new(), 10);
+        let ctx_all = CompletionCtx::LabelName {
+            prefix: String::new(),
+            selector: String::new(),
+        };
+        let results_all = compute_completions(
+            &ctx_all,
+            &[],
+            &cache,
+            &HashMap::<(String, String), Vec<String>>::new(),
+            10,
+        );
         assert!(results_all.contains(&"job".to_string()));
     }
 
     #[test]
     fn completions_label_value() {
         let mut cache: HashMap<(String, String), Vec<String>> = HashMap::new();
-        cache.insert(("job".into(), String::new()), vec![
-            "node".to_string(),
-            "prometheus".to_string(),
-            "alertmanager".to_string(),
-        ]);
+        cache.insert(
+            ("job".into(), String::new()),
+            vec![
+                "node".to_string(),
+                "prometheus".to_string(),
+                "alertmanager".to_string(),
+            ],
+        );
         let ctx = CompletionCtx::LabelValue {
             label: "job".into(),
             prefix: "pro".into(),
             selector: String::new(),
         };
-        let results = compute_completions(&ctx, &[], &HashMap::<String,Vec<String>>::new(), &cache, 10);
+        let results = compute_completions(
+            &ctx,
+            &[],
+            &HashMap::<String, Vec<String>>::new(),
+            &cache,
+            10,
+        );
         assert_eq!(results, vec!["prometheus"]);
     }
 
@@ -754,10 +849,10 @@ mod tests {
         // selector is active, and not served for a different selector.
         let selector = r#"up{namespace="prod"}"#.to_string();
         let mut cache: HashMap<(String, String), Vec<String>> = HashMap::new();
-        cache.insert(("pod".into(), selector.clone()), vec![
-            "app-1".to_string(),
-            "app-2".to_string(),
-        ]);
+        cache.insert(
+            ("pod".into(), selector.clone()),
+            vec!["app-1".to_string(), "app-2".to_string()],
+        );
 
         let ctx_match = CompletionCtx::LabelValue {
             label: "pod".into(),
@@ -765,7 +860,13 @@ mod tests {
             selector: selector.clone(),
         };
         assert_eq!(
-            compute_completions(&ctx_match, &[], &HashMap::<String,Vec<String>>::new(), &cache, 10),
+            compute_completions(
+                &ctx_match,
+                &[],
+                &HashMap::<String, Vec<String>>::new(),
+                &cache,
+                10
+            ),
             vec!["app-1", "app-2"]
         );
 
@@ -775,6 +876,13 @@ mod tests {
             prefix: String::new(),
             selector: String::new(),
         };
-        assert!(compute_completions(&ctx_other, &[], &HashMap::<String,Vec<String>>::new(), &cache, 10).is_empty());
+        assert!(compute_completions(
+            &ctx_other,
+            &[],
+            &HashMap::<String, Vec<String>>::new(),
+            &cache,
+            10
+        )
+        .is_empty());
     }
 }

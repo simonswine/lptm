@@ -1,7 +1,18 @@
 /// PromQL aggregation operators (from promql.terms.ts).
 pub const AGGREGATION_OPS: &[&str] = &[
-    "avg", "bottomk", "count", "count_values", "group", "limitk",
-    "limit_ratio", "max", "min", "quantile", "stddev", "stdvar", "sum",
+    "avg",
+    "bottomk",
+    "count",
+    "count_values",
+    "group",
+    "limitk",
+    "limit_ratio",
+    "max",
+    "min",
+    "quantile",
+    "stddev",
+    "stdvar",
+    "sum",
     "topk",
 ];
 
@@ -99,8 +110,14 @@ pub const BINARY_KEYWORDS: &[&str] = &["and", "atan2", "or", "unless"];
 
 /// Binary expression modifier keywords.
 pub const BINARY_MODIFIERS: &[&str] = &[
-    "bool", "fill", "fill_left", "fill_right", "group_left", "group_right",
-    "ignoring", "on",
+    "bool",
+    "fill",
+    "fill_left",
+    "fill_right",
+    "group_left",
+    "group_right",
+    "ignoring",
+    "on",
 ];
 
 /// Special value literals.

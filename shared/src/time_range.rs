@@ -160,8 +160,8 @@ pub fn display_label(time_range: &str) -> String {
     if let Some((from, to)) = split_absolute(time_range) {
         // Trim seconds when they're :00 for compactness.
         let fmt = |s: &str| {
-            if s.ends_with(":00") {
-                s[..s.len() - 3].to_string()
+            if let Some(stripped) = s.strip_suffix(":00") {
+                stripped.to_string()
             } else {
                 s.to_string()
             }

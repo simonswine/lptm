@@ -6,8 +6,8 @@ use crate::app::{
     filtered_pyroscope_series_indices, sorted_datasource_indices, Effect, Event, Model,
     PyroscopeSeriesItem, PyroscopeSubScreen, Screen,
 };
-use crate::pyroscope::{HeatmapSlot, TimelineSeries};
 use crate::pyroscope::FlamegraphNav;
+use crate::pyroscope::{HeatmapSlot, TimelineSeries};
 
 pub fn handle_enter_pyroscope(model: &mut Model) -> Command<Effect, Event> {
     // Use the favorites-sorted indices (same order as view()) so that
@@ -114,7 +114,6 @@ pub fn handle_pyroscope_series_prev(model: &mut Model) -> Command<Effect, Event>
     render()
 }
 
-
 pub fn handle_pyroscope_profile_type_next(model: &mut Model) -> Command<Effect, Event> {
     let len = model.pyroscope_profile_types.len();
     if len > 0 {
@@ -127,8 +126,7 @@ pub fn handle_pyroscope_profile_type_next(model: &mut Model) -> Command<Effect, 
 pub fn handle_pyroscope_profile_type_prev(model: &mut Model) -> Command<Effect, Event> {
     let len = model.pyroscope_profile_types.len();
     if len > 0 {
-        model.pyroscope_profile_type_index =
-            (model.pyroscope_profile_type_index + len - 1) % len;
+        model.pyroscope_profile_type_index = (model.pyroscope_profile_type_index + len - 1) % len;
         model.pyroscope_series_index = 0;
     }
     render()
@@ -341,10 +339,7 @@ pub fn handle_pyroscope_direct_load(
 /// Set the time range directly without triggering a series reload.
 /// Used when restoring a pyroscope history entry so EnterPyroscope preserves
 /// the stored time range rather than defaulting to "1h".
-pub fn handle_pyroscope_set_time_range(
-    model: &mut Model,
-    range: String,
-) -> Command<Effect, Event> {
+pub fn handle_pyroscope_set_time_range(model: &mut Model, range: String) -> Command<Effect, Event> {
     model.time_range = range;
     render()
 }
@@ -433,10 +428,7 @@ pub fn handle_flame_zoom_out(model: &mut Model) -> Command<Effect, Event> {
     render()
 }
 
-pub fn handle_flamegraph_viewport_chars(
-    model: &mut Model,
-    chars: u64,
-) -> Command<Effect, Event> {
+pub fn handle_flamegraph_viewport_chars(model: &mut Model, chars: u64) -> Command<Effect, Event> {
     model.flamegraph_nav.viewport_chars = chars;
     render()
 }
@@ -459,15 +451,21 @@ pub fn handle_exemplar_select_prev(model: &mut Model) -> Command<Effect, Event> 
 
 fn exemplar_count(model: &Model) -> usize {
     match model.pyroscope_sub_screen {
-        PyroscopeSubScreen::Timeline => {
-            model.pyroscope_timeline.iter().flat_map(|s| s.exemplars.iter()).count()
-        }
-        PyroscopeSubScreen::ProfileHeatmap => {
-            model.pyroscope_heatmap.iter().flat_map(|s| s.exemplars.iter()).count()
-        }
-        PyroscopeSubScreen::SpanHeatmap => {
-            model.pyroscope_span_heatmap.iter().flat_map(|s| s.exemplars.iter()).count()
-        }
+        PyroscopeSubScreen::Timeline => model
+            .pyroscope_timeline
+            .iter()
+            .flat_map(|s| s.exemplars.iter())
+            .count(),
+        PyroscopeSubScreen::ProfileHeatmap => model
+            .pyroscope_heatmap
+            .iter()
+            .flat_map(|s| s.exemplars.iter())
+            .count(),
+        PyroscopeSubScreen::SpanHeatmap => model
+            .pyroscope_span_heatmap
+            .iter()
+            .flat_map(|s| s.exemplars.iter())
+            .count(),
         _ => 0,
     }
 }

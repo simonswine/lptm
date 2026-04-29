@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-
 /// Flamegraph from SelectMergeStacktraces.
 /// Level encoding identical to flamebearer: groups of 4 in Level.values:
 /// `[x_offset, total_samples, self_samples, name_index]`
@@ -59,7 +58,13 @@ pub struct FlamegraphNav {
 
 impl Default for FlamegraphNav {
     fn default() -> Self {
-        FlamegraphNav { root_level: 0, root_frame: 0, sel_level: 0, sel_frame: 0, viewport_chars: 200 }
+        FlamegraphNav {
+            root_level: 0,
+            root_frame: 0,
+            sel_level: 0,
+            sel_frame: 0,
+            viewport_chars: 200,
+        }
     }
 }
 
@@ -67,7 +72,9 @@ impl FlamegraphNav {
     /// Minimum frame width (in samples) to be considered navigable.
     /// Frames narrower than this render as 0 characters and should be skipped.
     fn min_nav_width(&self, root_w: u64) -> u64 {
-        if self.viewport_chars == 0 { return 1; }
+        if self.viewport_chars == 0 {
+            return 1;
+        }
         root_w / self.viewport_chars
     }
 
@@ -91,12 +98,17 @@ impl FlamegraphNav {
         let lv = fg.levels.get(self.sel_level)?;
         let i = self.sel_frame * 4;
         (i + 1 < lv.values.len()).then(|| {
-            (lv.values[i] as u64, lv.values[i] as u64 + lv.values[i + 1] as u64)
+            (
+                lv.values[i] as u64,
+                lv.values[i] as u64 + lv.values[i + 1] as u64,
+            )
         })
     }
 
     pub fn move_right(&mut self, fg: &FlameGraph) {
-        let Some(lv) = fg.levels.get(self.sel_level) else { return };
+        let Some(lv) = fg.levels.get(self.sel_level) else {
+            return;
+        };
         let (rx, rw) = self.root_bounds(fg);
         let min_w = self.min_nav_width(rw);
         for i in (self.sel_frame + 1)..(lv.values.len() / 4) {
@@ -108,7 +120,9 @@ impl FlamegraphNav {
     }
 
     pub fn move_left(&mut self, fg: &FlameGraph) {
-        let Some(lv) = fg.levels.get(self.sel_level) else { return };
+        let Some(lv) = fg.levels.get(self.sel_level) else {
+            return;
+        };
         let (rx, rw) = self.root_bounds(fg);
         let min_w = self.min_nav_width(rw);
         for i in (0..self.sel_frame).rev() {
@@ -125,7 +139,9 @@ impl FlamegraphNav {
         if new_level >= fg.levels.len() {
             return;
         }
-        let Some((sx, se)) = self.sel_bounds(fg) else { return };
+        let Some((sx, se)) = self.sel_bounds(fg) else {
+            return;
+        };
         let (_, rw) = self.root_bounds(fg);
         let min_w = self.min_nav_width(rw);
         let lv = &fg.levels[new_level].values;
@@ -146,7 +162,9 @@ impl FlamegraphNav {
             return;
         }
         let new_level = self.sel_level - 1;
-        let Some((sx, se)) = self.sel_bounds(fg) else { return };
+        let Some((sx, se)) = self.sel_bounds(fg) else {
+            return;
+        };
         let (rx, rw) = self.root_bounds(fg);
         let min_w = self.min_nav_width(rw);
         let lv = &fg.levels[new_level].values;
@@ -290,9 +308,18 @@ fn build_callee_subtree(fg: &FlameGraph, level: usize, ranges: &[(u64, u64)]) ->
             continue;
         }
         let self_s = (fs as u128 * clipped_total as u128 / fw as u128) as u64;
-        let name = fg.names.get(raw[i * 4 + 3] as usize).cloned().unwrap_or_default();
+        let name = fg
+            .names
+            .get(raw[i * 4 + 3] as usize)
+            .cloned()
+            .unwrap_or_default();
         let children = build_callee_subtree(fg, level + 1, &child_ranges);
-        nodes.push(SandwichNode { name, total: clipped_total, self_s, children });
+        nodes.push(SandwichNode {
+            name,
+            total: clipped_total,
+            self_s,
+            children,
+        });
     }
     nodes
 }
@@ -317,9 +344,18 @@ fn build_caller_chain(
             continue;
         }
         if fx <= occ_x_off && fx + fw > occ_x_off {
-            let name = fg.names.get(raw[i * 4 + 3] as usize).cloned().unwrap_or_default();
+            let name = fg
+                .names
+                .get(raw[i * 4 + 3] as usize)
+                .cloned()
+                .unwrap_or_default();
             let children = build_caller_chain(fg, level + 1, occ_level, occ_x_off, occ_width);
-            return vec![SandwichNode { name, total: occ_width, self_s: 0, children }];
+            return vec![SandwichNode {
+                name,
+                total: occ_width,
+                self_s: 0,
+                children,
+            }];
         }
     }
     Vec::new()
@@ -348,12 +384,16 @@ fn merge_nodes(nodes: Vec<SandwichNode>) -> Vec<SandwichNode> {
 
 /// Maximum depth of the deepest leaf reachable from `nodes` (leaf = 1, empty = 0).
 fn subtree_height(nodes: &[SandwichNode]) -> usize {
-    nodes.iter().map(|n| 1 + subtree_height(&n.children)).max().unwrap_or(0)
+    nodes
+        .iter()
+        .map(|n| 1 + subtree_height(&n.children))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Lay out callee nodes top-down: depth 0 = first row, children below their parent.
 fn flatten_tree(
-    nodes: &mut Vec<SandwichNode>,
+    nodes: &mut [SandwichNode],
     x_start: u64,
     target_samples: u64,
     depth: usize,
@@ -386,7 +426,7 @@ fn flatten_tree(
 /// subtree height so that every direct caller (leaf) lands at `total_depth - 1`
 /// regardless of how deep its path goes. Shorter paths get empty space at the top.
 fn flatten_caller_tree(
-    nodes: &mut Vec<SandwichNode>,
+    nodes: &mut [SandwichNode],
     x_start: u64,
     target_samples: u64,
     total_depth: usize,
@@ -423,9 +463,13 @@ fn flatten_caller_tree(
 /// - Merges the ancestor chains into a callers tree (each ancestor is credited
 ///   with the occurrence's own sample count, as Grafana does).
 /// - Merges the descendant trees into a callees tree (actual sample widths).
-/// Frames at each merged level are sorted by total samples descending and laid
-/// out consecutively from x=0.
-pub fn build_sandwich_view(fg: &FlameGraph, target_name: &str, units: String) -> Option<SandwichView> {
+/// - Frames at each merged level are sorted by total samples descending and laid
+///   out consecutively from x=0.
+pub fn build_sandwich_view(
+    fg: &FlameGraph,
+    target_name: &str,
+    units: String,
+) -> Option<SandwichView> {
     let root_samples = fg.total as u64;
 
     // ── Find all occurrences ─────────────────────────────────────────────────
@@ -486,7 +530,13 @@ pub fn build_sandwich_view(fg: &FlameGraph, target_name: &str, units: String) ->
     let mut caller_roots = merge_nodes(caller_roots);
     let total_caller_depth = subtree_height(&caller_roots);
     let mut callers: Vec<FlamegraphLevelView> = Vec::new();
-    flatten_caller_tree(&mut caller_roots, 0, target_samples, total_caller_depth, &mut callers);
+    flatten_caller_tree(
+        &mut caller_roots,
+        0,
+        target_samples,
+        total_caller_depth,
+        &mut callers,
+    );
     // Ensure all levels up to total_caller_depth exist (intermediate rows may be empty).
     while callers.len() < total_caller_depth {
         callers.push(FlamegraphLevelView { frames: Vec::new() });
@@ -692,7 +742,10 @@ pub fn build_timeline_view(series_list: &[TimelineSeries]) -> Option<TimelineVie
     }
     let data: Vec<(f64, f64)> = map.iter().map(|(&ts, &v)| (ts as f64, v)).collect();
     let value_min = data.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
-    let value_max = data.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max);
+    let value_max = data
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(f64::NEG_INFINITY, f64::max);
     let start_ms = *map.keys().next().unwrap();
     let end_ms = *map.keys().next_back().unwrap();
     // Collect and sort all exemplars by value descending.
@@ -765,7 +818,11 @@ pub fn build_heatmap_view(slots: &[HeatmapSlot]) -> Option<HeatmapView> {
 
     // step_ms comes from the query (stored on each slot), not derived from timestamps
     // because empty slots may be omitted from the API response.
-    let step_ms = slots.iter().map(|s| s.step_ms).find(|&s| s > 0).unwrap_or(0);
+    let step_ms = slots
+        .iter()
+        .map(|s| s.step_ms)
+        .find(|&s| s > 0)
+        .unwrap_or(0);
 
     // Multiple HeatmapSeries may contribute slots at the same timestamp.
     // Sort by timestamp then merge same-timestamp slots by summing counts
@@ -904,11 +961,18 @@ mod tests {
     fn test_callee_positioning() {
         let graph = make_fg(
             100,
-            vec!["root", "target", "funcA", "funcB", "child_of_A", "child_of_B"],
             vec![
-                vec![0, 100, 0, 0],               // L0
-                vec![0, 100, 0, 1],               // L1: target
-                vec![0, 60, 10, 2, 60, 40, 5, 3], // L2: funcA, funcB
+                "root",
+                "target",
+                "funcA",
+                "funcB",
+                "child_of_A",
+                "child_of_B",
+            ],
+            vec![
+                vec![0, 100, 0, 0],                // L0
+                vec![0, 100, 0, 1],                // L1: target
+                vec![0, 60, 10, 2, 60, 40, 5, 3],  // L2: funcA, funcB
                 vec![0, 40, 40, 4, 60, 20, 20, 5], // L3: child_of_A, child_of_B
             ],
         );
@@ -957,9 +1021,9 @@ mod tests {
             100,
             vec!["root", "callerA", "callerB", "target"],
             vec![
-                vec![0, 100, 0, 0],                   // L0: root
-                vec![0, 60, 0, 1, 60, 40, 0, 2],      // L1: callerA, callerB
-                vec![0, 60, 60, 3, 60, 40, 40, 3],    // L2: target x2
+                vec![0, 100, 0, 0],                // L0: root
+                vec![0, 60, 0, 1, 60, 40, 0, 2],   // L1: callerA, callerB
+                vec![0, 60, 60, 3, 60, 40, 40, 3], // L2: target x2
             ],
         );
 
@@ -983,7 +1047,10 @@ mod tests {
         assert_eq!(a.x_start, 0);
         assert_eq!(a.width, 60);
         // Key: callerB must sit under root's right portion (x=60), not at x=0.
-        assert_eq!(b.x_start, 60, "callerB must be positioned within root's x-range");
+        assert_eq!(
+            b.x_start, 60,
+            "callerB must be positioned within root's x-range"
+        );
         assert_eq!(b.width, 40);
     }
 
@@ -1003,10 +1070,10 @@ mod tests {
             100,
             vec!["root", "pathA", "pathB", "target", "common"],
             vec![
-                vec![0, 100, 0, 0],                   // L0
-                vec![0, 60, 0, 1, 60, 40, 0, 2],      // L1: pathA, pathB
-                vec![0, 60, 0, 3, 60, 40, 0, 3],      // L2: target x2
-                vec![0, 60, 60, 4, 60, 40, 40, 4],    // L3: common x2
+                vec![0, 100, 0, 0],                // L0
+                vec![0, 60, 0, 1, 60, 40, 0, 2],   // L1: pathA, pathB
+                vec![0, 60, 0, 3, 60, 40, 0, 3],   // L2: target x2
+                vec![0, 60, 60, 4, 60, 40, 40, 4], // L3: common x2
             ],
         );
 
@@ -1019,7 +1086,10 @@ mod tests {
         assert_eq!(l0.len(), 1, "both 'common' frames should merge into one");
         assert_eq!(l0[0].name, "common");
         assert_eq!(l0[0].width, 100, "merged width should be 60+40");
-        assert_eq!(l0[0].self_samples, 100, "merged self-samples should be 60+40");
+        assert_eq!(
+            l0[0].self_samples, 100,
+            "merged self-samples should be 60+40"
+        );
     }
 
     // ── Caller bottom-alignment ───────────────────────────────────────────────
@@ -1051,13 +1121,20 @@ mod tests {
         // L4: target (0..60)                       <- occurrence 2 (occ_level=4)
         let graph = make_fg(
             100,
-            vec!["root", "longPath", "shortPath", "longL2", "target", "longL3"],
             vec![
-                vec![0, 100, 0, 0],                    // L0: root
-                vec![0, 60, 0, 1, 60, 40, 0, 2],       // L1: longPath, shortPath
-                vec![0, 60, 0, 3, 60, 40, 40, 4],      // L2: longL2, target(occ1)
-                vec![0, 60, 0, 5],                     // L3: longL3
-                vec![0, 60, 60, 4],                    // L4: target(occ2)
+                "root",
+                "longPath",
+                "shortPath",
+                "longL2",
+                "target",
+                "longL3",
+            ],
+            vec![
+                vec![0, 100, 0, 0],               // L0: root
+                vec![0, 60, 0, 1, 60, 40, 0, 2],  // L1: longPath, shortPath
+                vec![0, 60, 0, 3, 60, 40, 40, 4], // L2: longL2, target(occ1)
+                vec![0, 60, 0, 5],                // L3: longL3
+                vec![0, 60, 60, 4],               // L4: target(occ2)
             ],
         );
 
@@ -1100,9 +1177,9 @@ mod tests {
             100,
             vec!["shared", "pathA", "pathB", "target"],
             vec![
-                vec![0, 100, 0, 0],                   // L0: shared (root)
-                vec![0, 60, 0, 1, 60, 40, 0, 2],      // L1: pathA, pathB
-                vec![0, 60, 60, 3, 60, 40, 40, 3],    // L2: target x2
+                vec![0, 100, 0, 0],                // L0: shared (root)
+                vec![0, 60, 0, 1, 60, 40, 0, 2],   // L1: pathA, pathB
+                vec![0, 60, 60, 3, 60, 40, 40, 3], // L2: target x2
             ],
         );
 
@@ -1113,7 +1190,11 @@ mod tests {
 
         // Outermost level: shared should appear once, credited with 100.
         let l0 = &sw.callers[0].frames;
-        assert_eq!(l0.len(), 1, "'shared' should appear as a single merged caller");
+        assert_eq!(
+            l0.len(),
+            1,
+            "'shared' should appear as a single merged caller"
+        );
         assert_eq!(l0[0].name, "shared");
         assert_eq!(l0[0].width, 100);
     }

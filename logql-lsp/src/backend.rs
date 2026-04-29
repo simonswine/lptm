@@ -3,15 +3,14 @@
 use std::collections::HashMap;
 
 use dashmap::DashMap;
-use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams,
-    CompletionResponse, CompletionTextEdit, Diagnostic, DiagnosticSeverity,
-    DidChangeTextDocumentParams, DidOpenTextDocumentParams, InitializeParams,
-    InitializeResult, InitializedParams, MessageType, Position, Range,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
-    WorkDoneProgressOptions,
-};
 use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
+    CompletionTextEdit, Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
+    DidOpenTextDocumentParams, InitializeParams, InitializeResult, InitializedParams, MessageType,
+    Position, Range, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextEdit, Url, WorkDoneProgressOptions,
+};
 use tower_lsp::{Client, LanguageServer};
 
 use logql_core::analyzer::{analyze, Severity};
@@ -172,11 +171,7 @@ impl LanguageServer for LogQLBackend {
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let uri = params
-            .text_document_position
-            .text_document
-            .uri
-            .to_string();
+        let uri = params.text_document_position.text_document.uri.to_string();
         let pos = params.text_document_position.position;
 
         let text = match self.documents.get(&uri) {
@@ -312,9 +307,7 @@ fn prefix_start_byte(text: &str, cursor_byte: usize) -> usize {
     let bytes = before.as_bytes();
     let mut i = bytes.len();
     while i > 0
-        && (bytes[i - 1].is_ascii_alphanumeric()
-            || bytes[i - 1] == b'_'
-            || bytes[i - 1] == b':')
+        && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b':')
     {
         i -= 1;
     }

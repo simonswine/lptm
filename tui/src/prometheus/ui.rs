@@ -12,9 +12,7 @@ use crate::highlight;
 pub fn render_query_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     let split = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
 
-    let query_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" PromQL ");
+    let query_block = Block::default().borders(Borders::ALL).title(" PromQL ");
 
     let query_line: Line = highlight::highlight_query(&vm.query, vm.cursor_pos);
     let query_text = Paragraph::new(query_line).block(query_block);
@@ -27,7 +25,10 @@ pub fn render_query_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         .borders(Borders::ALL)
         .title(Line::from(vec![
             Span::raw(" Results — "),
-            Span::styled(display_label(&vm.time_range), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                display_label(&vm.time_range),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw(" "),
         ]));
 
@@ -69,8 +70,7 @@ fn render_completion_popup(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         let popup_h = 3u16.min(area.height);
         let popup_area = Rect::new(area.x, area.y, popup_w, popup_h);
         frame.render_widget(Clear, popup_area);
-        let loading = Paragraph::new("Loading…")
-            .block(Block::default().borders(Borders::ALL));
+        let loading = Paragraph::new("Loading…").block(Block::default().borders(Borders::ALL));
         frame.render_widget(loading, popup_area);
         return;
     }
@@ -92,18 +92,17 @@ fn render_completion_popup(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     list_state.select(vm.completion_index);
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Completions "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Completions "),
+        )
         .highlight_style(Style::default().fg(Color::Black).bg(Color::White));
 
     frame.render_stateful_widget(list, popup_area, &mut list_state);
 }
 
-fn render_results_table(
-    frame: &mut Frame,
-    results: &QueryResultsView,
-    block: Block,
-    area: Rect,
-) {
+fn render_results_table(frame: &mut Frame, results: &QueryResultsView, block: Block, area: Rect) {
     let header_cells: Vec<Cell> = results
         .columns
         .iter()
