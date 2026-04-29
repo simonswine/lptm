@@ -115,8 +115,7 @@ fn analyze_expr(expr: &Expr, diags: &mut Vec<Diagnostic>) -> ExprType {
                     None => {
                         diags.push(Diagnostic {
                             severity: Severity::Error,
-                            message: "quantile_over_time requires a quantile parameter"
-                                .to_string(),
+                            message: "quantile_over_time requires a quantile parameter".to_string(),
                             span: expr.span,
                         });
                     }
@@ -329,8 +328,7 @@ mod tests {
 
     #[test]
     fn valid_quantile_over_time() {
-        let diags =
-            analyze_query(r#"quantile_over_time(0.99, {j="t"} | unwrap dur [5m])"#);
+        let diags = analyze_query(r#"quantile_over_time(0.99, {j="t"} | unwrap dur [5m])"#);
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
     }
 
@@ -342,8 +340,7 @@ mod tests {
 
     #[test]
     fn valid_binary_expr() {
-        let diags =
-            analyze_query(r#"rate({a="1"}[5m]) + rate({b="2"}[5m])"#);
+        let diags = analyze_query(r#"rate({a="1"}[5m]) + rate({b="2"}[5m])"#);
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
     }
 
@@ -375,7 +372,8 @@ mod tests {
         let diags = analyze_query("rate({}[5m])");
         let w = warnings(&diags);
         assert!(
-            w.iter().any(|d| d.message.contains("empty stream selector")),
+            w.iter()
+                .any(|d| d.message.contains("empty stream selector")),
             "expected empty selector warning, got {diags:?}"
         );
     }
@@ -410,7 +408,8 @@ mod tests {
         let diags = analyze(&expr);
         let e = errors(&diags);
         assert!(
-            e.iter().any(|d| d.message.contains("unknown range function")),
+            e.iter()
+                .any(|d| d.message.contains("unknown range function")),
             "expected unknown function error, got {diags:?}"
         );
     }
@@ -502,8 +501,7 @@ mod tests {
 
     #[test]
     fn quantile_over_time_out_of_range() {
-        let diags =
-            analyze_query(r#"quantile_over_time(1.5, {j="t"} | unwrap dur [5m])"#);
+        let diags = analyze_query(r#"quantile_over_time(1.5, {j="t"} | unwrap dur [5m])"#);
         let w = warnings(&diags);
         assert!(
             w.iter()
@@ -588,8 +586,7 @@ mod tests {
         let diags = analyze(&expr);
         let e = errors(&diags);
         assert!(
-            e.iter()
-                .any(|d| d.message.contains("requires a parameter")),
+            e.iter().any(|d| d.message.contains("requires a parameter")),
             "expected missing param error, got {diags:?}"
         );
     }
@@ -648,7 +645,8 @@ mod tests {
         let diags = analyze_query(r#"sum({job="test"})"#);
         let e = errors(&diags);
         assert!(
-            e.iter().any(|d| d.message.contains("requires a metric expression")),
+            e.iter()
+                .any(|d| d.message.contains("requires a metric expression")),
             "expected type mismatch error, got {diags:?}"
         );
     }
@@ -744,8 +742,7 @@ mod tests {
             .expect("expected type mismatch error");
         let text = &input[mismatch.span.start..mismatch.span.end];
         assert_eq!(
-            text,
-            r#"{job="test"}"#,
+            text, r#"{job="test"}"#,
             "span should point to the inner log query"
         );
     }
@@ -783,7 +780,11 @@ mod tests {
         q.push_str(r#"| level="error" | line_format "{{.status}} {{.msg}}" [5m])"#);
         q.push_str(r#") / sum by (job, ns, pod) ("#);
         q.push_str(r#"rate({job="application-server", namespace="production"}[5m]))"#);
-        assert!(q.len() >= 250, "query should be substantial: {} chars", q.len());
+        assert!(
+            q.len() >= 250,
+            "query should be substantial: {} chars",
+            q.len()
+        );
 
         let result = parse(&q);
         assert!(

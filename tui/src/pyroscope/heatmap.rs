@@ -78,24 +78,16 @@ impl HeatmapPopup {
             ]),
             Line::from(vec![
                 Span::styled("count: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    self.count.to_string(),
-                    Style::default().fg(Color::Yellow),
-                ),
+                Span::styled(self.count.to_string(), Style::default().fg(Color::Yellow)),
             ]),
         ];
 
-        let popup_w = lines
-            .iter()
-            .map(|l| l.width())
-            .max()
-            .unwrap_or(20) as u16
-            + 4; // padding + borders
+        let popup_w = lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16 + 4; // padding + borders
         let popup_h = lines.len() as u16 + 2; // borders
 
         // Place popup to the right and below the click, flipping if it would
         // overflow the frame.
-        let popup_x = if self.screen_x + popup_w + 1 <= frame_area.right() {
+        let popup_x = if self.screen_x + popup_w < frame_area.right() {
             self.screen_x + 1
         } else {
             self.screen_x.saturating_sub(popup_w)
@@ -144,7 +136,12 @@ impl HeatmapLayout {
         if graph_w == 0 || graph_h == 0 {
             return None;
         }
-        Some(HeatmapLayout { graph_x, graph_y, graph_w, graph_h })
+        Some(HeatmapLayout {
+            graph_x,
+            graph_y,
+            graph_w,
+            graph_h,
+        })
     }
 
     /// Map a timestamp to a pixel column using the **same** slot→pixel formula
@@ -160,18 +157,15 @@ impl HeatmapLayout {
         let w = self.graph_w as usize;
         let step = hm.step_ms.max(1);
 
-        let s = ((ts_ms - hm.start_ms) / step)
-            .max(0)
-            .min(n_cols as i64 - 1) as usize;
+        let s = ((ts_ms - hm.start_ms) / step).max(0).min(n_cols as i64 - 1) as usize;
 
         // Sub-slot fraction: how far within [slot_xmin, slot_xmax) is ts?
-        let sub_frac = ((ts_ms - hm.start_ms - s as i64 * step) as f64 / step as f64)
-            .clamp(0.0, 1.0);
+        let sub_frac =
+            ((ts_ms - hm.start_ms - s as i64 * step) as f64 / step as f64).clamp(0.0, 1.0);
 
         // Pixel range [c_first, c_next) assigned to slot s by the renderer.
-        // ceil(s * w / n_cols) = (s * w + n_cols - 1) / n_cols
-        let c_first = (s * w + n_cols - 1) / n_cols;
-        let c_next = ((s + 1) * w + n_cols - 1) / n_cols;
+        let c_first = (s * w).div_ceil(n_cols);
+        let c_next = ((s + 1) * w).div_ceil(n_cols);
         let slot_px = c_next.saturating_sub(c_first).max(1);
 
         let col = c_first + (sub_frac * slot_px as f64) as usize;
@@ -211,8 +205,8 @@ impl HeatmapLayout {
         let col_bucket = n - 1 - raw_bucket;
 
         // First pixel row for col_bucket_idx b: ceil(b * h / n).
-        let r_first = (col_bucket * h + n - 1) / n;
-        let r_next  = ((col_bucket + 1) * h + n - 1) / n;
+        let r_first = (col_bucket * h).div_ceil(n);
+        let r_next = ((col_bucket + 1) * h).div_ceil(n);
         let mid = r_first + r_next.saturating_sub(r_first) / 2;
         mid.min(h.saturating_sub(1)) as u16
     }
@@ -315,8 +309,13 @@ pub fn render_heatmap(
     let y_bot_label = unit.format(hm.y_min);
     let y_label_w = y_label_width(hm, unit, inner.width);
 
-    let Some(layout) = HeatmapLayout::from_inner(inner, y_label_w) else { return None };
-    let HeatmapLayout { graph_x, graph_y, graph_w, graph_h } = layout;
+    let layout = HeatmapLayout::from_inner(inner, y_label_w)?;
+    let HeatmapLayout {
+        graph_x,
+        graph_y,
+        graph_w,
+        graph_h,
+    } = layout;
 
     let n_cols = hm.columns.len();
     let label_style = Style::default().fg(Color::DarkGray);
@@ -330,7 +329,7 @@ pub fn render_heatmap(
         (y_bot_label.as_str(), graph_h - 1),
     ] {
         // Only render the middle label if it won't overlap top or bottom.
-        if row == mid_row && mid_row == 0 || row == mid_row && mid_row == graph_h - 1 {
+        if (mid_row == graph_h - 1 || mid_row == 0) && row == mid_row {
             continue;
         }
         frame.render_widget(
@@ -413,10 +412,10 @@ pub fn render_heatmap(
 
 #[cfg(test)]
 mod tests {
-    use ratatui::{Terminal, backend::TestBackend};
-    use shared::pyroscope::{TimelineExemplar, build_heatmap_view};
     use super::*;
-    use shared::pyroscope::{HeatmapSlot};
+    use ratatui::{backend::TestBackend, Terminal};
+    use shared::pyroscope::HeatmapSlot;
+    use shared::pyroscope::{build_heatmap_view, TimelineExemplar};
 
     /// Build a minimal HeatmapView from explicit slot data.
     fn make_heatmap(n_slots: usize, n_buckets: usize, step_ms: i64) -> HeatmapView {
@@ -476,8 +475,16 @@ mod tests {
         let (layout, _) = make_layout(80, 20);
         // Exemplar at end of time and minimum value → bottom-right cell.
         let (col, row) = layout.exemplar_to_cell(hm.end_ms - 1, hm.y_min, &hm);
-        assert_eq!(col, layout.graph_w - 1, "rightmost time should give last col");
-        assert_eq!(row, layout.graph_h - 1, "minimum value should give last row");
+        assert_eq!(
+            col,
+            layout.graph_w - 1,
+            "rightmost time should give last col"
+        );
+        assert_eq!(
+            row,
+            layout.graph_h - 1,
+            "minimum value should give last row"
+        );
     }
 
     #[test]
@@ -539,13 +546,32 @@ mod tests {
         // step_ms comes from the slot field, not derived from timestamps.
         let step = 5_000i64;
         let slots = vec![
-            HeatmapSlot { timestamp_ms: step,     step_ms: step, y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
-            HeatmapSlot { timestamp_ms: 2 * step, step_ms: step, y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
+            HeatmapSlot {
+                timestamp_ms: step,
+                step_ms: step,
+                y_min: vec![0.0, 1.0],
+                counts: vec![1; 2],
+                exemplars: vec![],
+            },
+            HeatmapSlot {
+                timestamp_ms: 2 * step,
+                step_ms: step,
+                y_min: vec![0.0, 1.0],
+                counts: vec![1; 2],
+                exemplars: vec![],
+            },
         ];
         let hm = build_heatmap_view(&slots).unwrap();
-        assert_eq!(hm.start_ms, 0,         "start_ms = first_slot.timestamp_ms - step_ms");
-        assert_eq!(hm.end_ms,   2 * step,  "end_ms = last_slot.timestamp_ms (its x_max)");
-        assert_eq!(hm.step_ms,  step);
+        assert_eq!(
+            hm.start_ms, 0,
+            "start_ms = first_slot.timestamp_ms - step_ms"
+        );
+        assert_eq!(
+            hm.end_ms,
+            2 * step,
+            "end_ms = last_slot.timestamp_ms (its x_max)"
+        );
+        assert_eq!(hm.step_ms, step);
     }
 
     #[test]
@@ -555,14 +581,29 @@ mod tests {
         let step = 5_000i64;
         let slots = vec![
             // slot at t=5000 (x_min=0)
-            HeatmapSlot { timestamp_ms: step,      step_ms: step, y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
+            HeatmapSlot {
+                timestamp_ms: step,
+                step_ms: step,
+                y_min: vec![0.0, 1.0],
+                counts: vec![1; 2],
+                exemplars: vec![],
+            },
             // slot at t=20000 (x_min=15000) — gap of 3 steps, slots 2 and 3 are missing
-            HeatmapSlot { timestamp_ms: 4 * step,  step_ms: step, y_min: vec![0.0, 1.0], counts: vec![1; 2], exemplars: vec![] },
+            HeatmapSlot {
+                timestamp_ms: 4 * step,
+                step_ms: step,
+                y_min: vec![0.0, 1.0],
+                counts: vec![1; 2],
+                exemplars: vec![],
+            },
         ];
         let hm = build_heatmap_view(&slots).unwrap();
-        assert_eq!(hm.step_ms, step, "step_ms must come from query, not consecutive timestamp diff");
-        assert_eq!(hm.start_ms, 0,        "start_ms = first_slot.x_min");
-        assert_eq!(hm.end_ms,   4 * step, "end_ms = last_slot.x_max");
+        assert_eq!(
+            hm.step_ms, step,
+            "step_ms must come from query, not consecutive timestamp diff"
+        );
+        assert_eq!(hm.start_ms, 0, "start_ms = first_slot.x_min");
+        assert_eq!(hm.end_ms, 4 * step, "end_ms = last_slot.x_max");
     }
 
     #[test]
@@ -597,8 +638,7 @@ mod tests {
         let screen_y = layout.graph_y + layout.graph_h - 1;
         let (_slot, bucket) = layout.cell_to_slot_bucket(screen_x, screen_y, &hm).unwrap();
         assert_eq!(
-            bucket,
-            0,
+            bucket, 0,
             "bottom row should map to lowest raw bucket (index 0), got {}",
             bucket
         );
@@ -668,7 +708,10 @@ mod tests {
         // With exponential buckets, linear interpolation would give wrong results.
         // value_to_row must use bucket_bounds lookup.
         let (hm, _) = make_heatmap_nonuniform_buckets();
-        assert!(!hm.bucket_bounds.is_empty(), "bucket_bounds must be populated");
+        assert!(
+            !hm.bucket_bounds.is_empty(),
+            "bucket_bounds must be populated"
+        );
         let (layout, _) = make_layout(20, 14);
         let n = hm.n_buckets;
         let h = layout.graph_h as usize;
@@ -754,14 +797,18 @@ mod tests {
 
             // x_min (left edge) maps to this column.
             let (col, _) = layout.exemplar_to_cell(slot_x_min, val, &hm);
-            assert_eq!(col, expected_col,
-                "slot {i}: x_min={slot_x_min} should map to col {expected_col}, got {col}");
+            assert_eq!(
+                col, expected_col,
+                "slot {i}: x_min={slot_x_min} should map to col {expected_col}, got {col}"
+            );
 
             // Midpoint also maps to this column.
             let mid_ts = slot_x_min + step_ms / 2;
             let (col, _) = layout.exemplar_to_cell(mid_ts, val, &hm);
-            assert_eq!(col, expected_col,
-                "slot {i}: mid_ts={mid_ts} should map to col {expected_col}, got {col}");
+            assert_eq!(
+                col, expected_col,
+                "slot {i}: mid_ts={mid_ts} should map to col {expected_col}, got {col}"
+            );
 
             // x_max - 1ms (just before right edge) still maps to this column, not the next.
             let just_before_x_max = slot_x_max - 1;
@@ -797,25 +844,29 @@ mod tests {
         };
         let slots = vec![
             HeatmapSlot {
-                timestamp_ms: 1000, step_ms: 1000, // x_min=0, x_max=1000
+                timestamp_ms: 1000,
+                step_ms: 1000, // x_min=0, x_max=1000
                 y_min: vec![0.0, 100.0, 200.0],
                 counts: vec![1, 1, 1],
                 exemplars: vec![],
             },
             HeatmapSlot {
-                timestamp_ms: 2000, step_ms: 1000, // x_min=1000, x_max=2000
+                timestamp_ms: 2000,
+                step_ms: 1000, // x_min=1000, x_max=2000
                 y_min: vec![0.0, 100.0, 200.0],
-                counts: vec![1, 10, 1],  // bucket 1 is hot
+                counts: vec![1, 10, 1], // bucket 1 is hot
                 exemplars: vec![exemplar],
             },
             HeatmapSlot {
-                timestamp_ms: 3000, step_ms: 1000, // x_min=2000, x_max=3000
+                timestamp_ms: 3000,
+                step_ms: 1000, // x_min=2000, x_max=3000
                 y_min: vec![0.0, 100.0, 200.0],
                 counts: vec![1, 1, 1],
                 exemplars: vec![],
             },
             HeatmapSlot {
-                timestamp_ms: 4000, step_ms: 1000, // x_min=3000, x_max=4000
+                timestamp_ms: 4000,
+                step_ms: 1000, // x_min=3000, x_max=4000
                 y_min: vec![0.0, 100.0, 200.0],
                 counts: vec![1, 1, 1],
                 exemplars: vec![],
@@ -835,15 +886,28 @@ mod tests {
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut layout_out = None;
-        terminal.draw(|frame| {
-            let area = frame.area();
-            let block = ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .title(" Heatmap ");
-            let layout = render_heatmap(frame, hm, block, area, ProfileUnit::Nanoseconds, highlight, blink_on);
-            layout_out = layout;
-        }).unwrap();
-        (terminal, layout_out.expect("heatmap layout must be returned"))
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let block = ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .title(" Heatmap ");
+                let layout = render_heatmap(
+                    frame,
+                    hm,
+                    block,
+                    area,
+                    ProfileUnit::Nanoseconds,
+                    highlight,
+                    blink_on,
+                );
+                layout_out = layout;
+            })
+            .unwrap();
+        (
+            terminal,
+            layout_out.expect("heatmap layout must be returned"),
+        )
     }
 
     #[test]
@@ -875,14 +939,25 @@ mod tests {
         let cold_col = (2 * graph_w + n_cols - 1) / n_cols;
         let cold_row = 0usize;
 
-        let hot_cell = buf.cell((layout.graph_x + hot_col as u16, layout.graph_y + hot_row as u16)).unwrap();
-        let cold_cell = buf.cell((layout.graph_x + cold_col as u16, layout.graph_y + cold_row as u16)).unwrap();
+        let hot_cell = buf
+            .cell((
+                layout.graph_x + hot_col as u16,
+                layout.graph_y + hot_row as u16,
+            ))
+            .unwrap();
+        let cold_cell = buf
+            .cell((
+                layout.graph_x + cold_col as u16,
+                layout.graph_y + cold_row as u16,
+            ))
+            .unwrap();
 
         assert_ne!(
             hot_cell.style().bg,
             cold_cell.style().bg,
             "hot cell bg={:?} should differ from cold cell bg={:?}",
-            hot_cell.style().bg, cold_cell.style().bg,
+            hot_cell.style().bg,
+            cold_cell.style().bg,
         );
     }
 
@@ -896,7 +971,10 @@ mod tests {
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
 
         // Y-axis labels: y_min=0 and y_max=300 formatted as nanoseconds.
-        assert!(text.contains("0ns") || text.contains("0 ns"), "y_min label missing: {text:?}");
+        assert!(
+            text.contains("0ns") || text.contains("0 ns"),
+            "y_min label missing: {text:?}"
+        );
 
         // X-axis should show time labels (hh:mm:ss format).
         assert!(text.contains("00:00:00"), "x-axis start time label missing");
@@ -909,41 +987,59 @@ mod tests {
         // Render heatmap in upper 60% and exemplar table in lower 40%.
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| {
-            let area = frame.area();
-            let [vis_area, table_area] =
-                ratatui::layout::Layout::vertical([
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let [vis_area, table_area] = ratatui::layout::Layout::vertical([
                     ratatui::layout::Constraint::Percentage(60),
                     ratatui::layout::Constraint::Percentage(40),
                 ])
                 .areas(area);
 
-            let block = ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .title(" Heatmap ");
-            render_heatmap(frame, &hm, block, vis_area, ProfileUnit::Nanoseconds, None, false);
+                let block = ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .title(" Heatmap ");
+                render_heatmap(
+                    frame,
+                    &hm,
+                    block,
+                    vis_area,
+                    ProfileUnit::Nanoseconds,
+                    None,
+                    false,
+                );
 
-            let exemplars: Vec<_> = hm.exemplars.iter().collect();
-            crate::pyroscope::ui::render_exemplars(
-                frame,
-                &exemplars,
-                &hm.varying_label_keys,
-                table_area,
-                ProfileUnit::Nanoseconds,
-                0, // first exemplar selected
-                None,
-                false,
-            );
-        }).unwrap();
+                let exemplars: Vec<_> = hm.exemplars.iter().collect();
+                crate::pyroscope::ui::render_exemplars(
+                    frame,
+                    &exemplars,
+                    &hm.varying_label_keys,
+                    table_area,
+                    ProfileUnit::Nanoseconds,
+                    0, // first exemplar selected
+                    None,
+                    false,
+                );
+            })
+            .unwrap();
 
         let buf = terminal.backend().buffer().clone();
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
 
         // The exemplar at ts=1000ms (00:00:01) with value=150ns should appear in the table.
-        assert!(text.contains("00:00:01"), "exemplar time missing from table: {text:?}");
-        assert!(text.contains("150"), "exemplar value missing from table: {text:?}");
+        assert!(
+            text.contains("00:00:01"),
+            "exemplar time missing from table: {text:?}"
+        );
+        assert!(
+            text.contains("150"),
+            "exemplar value missing from table: {text:?}"
+        );
         // The profile_id should appear.
-        assert!(text.contains("prof-001"), "exemplar profile_id missing from table: {text:?}");
+        assert!(
+            text.contains("prof-001"),
+            "exemplar profile_id missing from table: {text:?}"
+        );
         // Column headers.
         assert!(text.contains("Time"), "Time header missing");
         assert!(text.contains("Value"), "Value header missing");
@@ -955,31 +1051,40 @@ mod tests {
 
         let backend = TestBackend::new(80, 15);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| {
-            let table_area = frame.area();
-            let exemplars: Vec<_> = hm.exemplars.iter().collect();
-            crate::pyroscope::ui::render_exemplars(
-                frame,
-                &exemplars,
-                &hm.varying_label_keys,
-                table_area,
-                ProfileUnit::Nanoseconds,
-                0, // row 0 selected
-                None,
-                false,
-            );
-        }).unwrap();
+        terminal
+            .draw(|frame| {
+                let table_area = frame.area();
+                let exemplars: Vec<_> = hm.exemplars.iter().collect();
+                crate::pyroscope::ui::render_exemplars(
+                    frame,
+                    &exemplars,
+                    &hm.varying_label_keys,
+                    table_area,
+                    ProfileUnit::Nanoseconds,
+                    0, // row 0 selected
+                    None,
+                    false,
+                );
+            })
+            .unwrap();
 
         let buf = terminal.backend().buffer().clone();
         // Find the ">>" highlight symbol — ratatui's TableState highlight_symbol.
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-        assert!(text.contains(">>"), "selected row highlight symbol '>>' missing");
+        assert!(
+            text.contains(">>"),
+            "selected row highlight symbol '>>' missing"
+        );
 
         // The selected row cells should have the magenta foreground style.
-        let magenta_cell = buf.content().iter().find(|c| {
-            c.style().fg == Some(ratatui::style::Color::Magenta)
-        });
-        assert!(magenta_cell.is_some(), "no cell with magenta fg found for selected row");
+        let magenta_cell = buf
+            .content()
+            .iter()
+            .find(|c| c.style().fg == Some(ratatui::style::Color::Magenta));
+        assert!(
+            magenta_cell.is_some(),
+            "no cell with magenta fg found for selected row"
+        );
     }
 
     #[test]
@@ -1029,19 +1134,22 @@ mod tests {
         //   3. count=1 vs count=1_000_000 are visually distinct.
         let slots = vec![
             HeatmapSlot {
-                timestamp_ms: 1000, step_ms: 1000,
+                timestamp_ms: 1000,
+                step_ms: 1000,
                 y_min: vec![0.0, 100.0],
                 counts: vec![0, 0],
                 exemplars: vec![],
             },
             HeatmapSlot {
-                timestamp_ms: 2000, step_ms: 1000,
+                timestamp_ms: 2000,
+                step_ms: 1000,
                 y_min: vec![0.0, 100.0],
                 counts: vec![1, 1],
                 exemplars: vec![],
             },
             HeatmapSlot {
-                timestamp_ms: 3000, step_ms: 1000,
+                timestamp_ms: 3000,
+                step_ms: 1000,
                 y_min: vec![0.0, 100.0],
                 counts: vec![1_000_000, 1_000_000],
                 exemplars: vec![],
@@ -1057,13 +1165,19 @@ mod tests {
         // To find the first terminal col that maps to slot k, we need the smallest
         // col where col * n_cols / graph_w == k, i.e. col = ceil(k * graph_w / n_cols).
         let col_for_slot = |k: usize| (k * graph_w + n_cols - 1) / n_cols;
-        let zero_col    = col_for_slot(0);
-        let one_col     = col_for_slot(1);
+        let zero_col = col_for_slot(0);
+        let one_col = col_for_slot(1);
         let million_col = col_for_slot(2);
 
-        let zero_cell    = buf.cell((layout.graph_x + zero_col as u16,    layout.graph_y)).unwrap();
-        let one_cell     = buf.cell((layout.graph_x + one_col as u16,     layout.graph_y)).unwrap();
-        let million_cell = buf.cell((layout.graph_x + million_col as u16, layout.graph_y)).unwrap();
+        let zero_cell = buf
+            .cell((layout.graph_x + zero_col as u16, layout.graph_y))
+            .unwrap();
+        let one_cell = buf
+            .cell((layout.graph_x + one_col as u16, layout.graph_y))
+            .unwrap();
+        let million_cell = buf
+            .cell((layout.graph_x + million_col as u16, layout.graph_y))
+            .unwrap();
 
         assert_eq!(
             zero_cell.style().bg,
@@ -1096,13 +1210,21 @@ mod tests {
 
         // Click on the y-axis label area (left of graph_x).
         let popup = HeatmapPopup::from_click(
-            layout.graph_x.saturating_sub(1), layout.graph_y, &layout, &hm, &slots,
+            layout.graph_x.saturating_sub(1),
+            layout.graph_y,
+            &layout,
+            &hm,
+            &slots,
         );
         assert!(popup.is_none(), "click on y-axis label should return None");
 
         // Click on x-axis label area (below graph).
         let popup = HeatmapPopup::from_click(
-            layout.graph_x, layout.graph_y + layout.graph_h, &layout, &hm, &slots,
+            layout.graph_x,
+            layout.graph_y + layout.graph_h,
+            &layout,
+            &hm,
+            &slots,
         );
         assert!(popup.is_none(), "click on x-axis row should return None");
     }

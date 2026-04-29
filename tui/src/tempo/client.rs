@@ -78,8 +78,12 @@ fn de_u64_str<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             write!(f, "u64 or string")
         }
-        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> { Ok(v) }
-        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> { Ok(v as u64) }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> {
+            Ok(v)
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> {
+            Ok(v as u64)
+        }
         fn visit_str<E: de::Error>(self, v: &str) -> Result<u64, E> {
             v.parse().map_err(de::Error::custom)
         }
@@ -102,7 +106,11 @@ fn parse_frame(frame: &Value) -> (Vec<TempoTrace>, String) {
         .unwrap_or("")
         .to_string();
 
-    if let Some(err) = values.get(3).and_then(|a| a.get(0)).and_then(|s| s.as_str()) {
+    if let Some(err) = values
+        .get(3)
+        .and_then(|a| a.get(0))
+        .and_then(|s| s.as_str())
+    {
         if !err.is_empty() {
             debug!("  stream error field: {err}");
         }
@@ -156,10 +164,17 @@ fn parse_span_frame(frame: &Value) -> (std::collections::HashMap<String, String>
     };
 
     let state = values
-        .get(2).and_then(|a| a.get(0)).and_then(|s| s.as_str())
-        .unwrap_or("").to_string();
+        .get(2)
+        .and_then(|a| a.get(0))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
 
-    if let Some(err) = values.get(3).and_then(|a| a.get(0)).and_then(|s| s.as_str()) {
+    if let Some(err) = values
+        .get(3)
+        .and_then(|a| a.get(0))
+        .and_then(|s| s.as_str())
+    {
         if !err.is_empty() {
             debug!("  span stream error: {err}");
         }
@@ -181,7 +196,10 @@ fn parse_span_frame(frame: &Value) -> (std::collections::HashMap<String, String>
             }
         }
     }
-    debug!("  span frame: {} span→trace pairs, state={state}", map.len());
+    debug!(
+        "  span frame: {} span→trace pairs, state={state}",
+        map.len()
+    );
     (map, state)
 }
 
@@ -205,7 +223,12 @@ fn unix_to_iso(secs: u64) -> String {
 
 impl TempoClient {
     pub fn new(grafana_url: String, uid: String, token: String) -> Self {
-        Self { http: reqwest::Client::new(), grafana_url, uid, token }
+        Self {
+            http: reqwest::Client::new(),
+            grafana_url,
+            uid,
+            token,
+        }
     }
 
     /// Resolve the Centrifuge channel namespace:
@@ -220,11 +243,16 @@ impl TempoClient {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("GET /api/frontend/settings returned {}", resp.status()));
+            return Err(anyhow!(
+                "GET /api/frontend/settings returned {}",
+                resp.status()
+            ));
         }
         let settings: FrontendSettings = resp.json().await?;
-        debug!("  frontend/settings: liveNamespaced={} namespace={:?}",
-            settings.live_namespaced, settings.namespace);
+        debug!(
+            "  frontend/settings: liveNamespaced={} namespace={:?}",
+            settings.live_namespaced, settings.namespace
+        );
 
         if settings.live_namespaced && !settings.namespace.is_empty() {
             return Ok(settings.namespace);
@@ -278,7 +306,10 @@ impl TempoClient {
         loop {
             match ws.next().await {
                 Some(Ok(Message::Text(t))) => {
-                    if t.trim() == "{}" { ws.send(Message::Text("{}".into())).await?; continue; }
+                    if t.trim() == "{}" {
+                        ws.send(Message::Text("{}".into())).await?;
+                        continue;
+                    }
                     let v: Value = serde_json::from_str(&t)?;
                     if v.get("id").and_then(|i| i.as_u64()) == Some(1) {
                         if let Some(err) = v.get("error") {
@@ -287,7 +318,9 @@ impl TempoClient {
                         break;
                     }
                 }
-                Some(Ok(Message::Ping(d))) => { ws.send(Message::Pong(d)).await?; }
+                Some(Ok(Message::Ping(d))) => {
+                    ws.send(Message::Pong(d)).await?;
+                }
                 Some(Err(e)) => return Err(anyhow!("WS error: {e}")),
                 None => return Err(anyhow!("WS closed before ConnectResult")),
                 _ => {}
@@ -340,23 +373,34 @@ impl TempoClient {
                     }
                     for line in t.lines() {
                         let line = line.trim();
-                        if line.is_empty() { continue; }
+                        if line.is_empty() {
+                            continue;
+                        }
                         let raw: Value = match serde_json::from_str(line) {
                             Ok(v) => v,
-                            Err(e) => { debug!("  parse error: {e}"); continue; }
+                            Err(e) => {
+                                debug!("  parse error: {e}");
+                                continue;
+                            }
                         };
 
                         if !subscribed && raw.get("id").and_then(|i| i.as_u64()) == Some(2) {
                             if let Some(err) = raw.get("error") {
                                 let code = err.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
-                                let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+                                let msg = err
+                                    .get("message")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("unknown");
                                 return Err(anyhow!("subscribe failed (code {code}): {msg}"));
                             }
                             subscribed = true;
                             continue;
                         }
 
-                        let msg: ServerMsg = serde_json::from_value(raw).unwrap_or(ServerMsg { id: None, push: None });
+                        let msg: ServerMsg = serde_json::from_value(raw).unwrap_or(ServerMsg {
+                            id: None,
+                            push: None,
+                        });
                         if let Some(push) = msg.push {
                             if let Some(pub_msg) = push.publication {
                                 let (pairs, state) = parse_span_frame(&pub_msg.data);
@@ -364,9 +408,14 @@ impl TempoClient {
                                     on_progress(pairs);
                                 }
                                 match state.as_str() {
-                                    "done" => { done = true; break; }
+                                    "done" => {
+                                        done = true;
+                                        break;
+                                    }
                                     "error" => {
-                                        let err = pub_msg.data.pointer("/data/values/3/0")
+                                        let err = pub_msg
+                                            .data
+                                            .pointer("/data/values/3/0")
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("unknown");
                                         return Err(anyhow!("{err}"));
@@ -376,10 +425,17 @@ impl TempoClient {
                             }
                         }
                     }
-                    if done { break 'outer; }
+                    if done {
+                        break 'outer;
+                    }
                 }
-                Some(Ok(Message::Ping(d))) => { ws.send(Message::Pong(d)).await?; }
-                Some(Ok(Message::Close(f))) => { debug!("← WS Close: {f:?}"); break; }
+                Some(Ok(Message::Ping(d))) => {
+                    ws.send(Message::Pong(d)).await?;
+                }
+                Some(Ok(Message::Close(f))) => {
+                    debug!("← WS Close: {f:?}");
+                    break;
+                }
                 Some(Err(e)) => return Err(anyhow!("WS error: {e}")),
                 None => break,
                 _ => {}
@@ -421,7 +477,10 @@ impl TempoClient {
             match ws.next().await {
                 Some(Ok(Message::Text(t))) => {
                     debug!("← (connect phase): {t}");
-                    if t.trim() == "{}" { ws.send(Message::Text("{}".into())).await?; continue; }
+                    if t.trim() == "{}" {
+                        ws.send(Message::Text("{}".into())).await?;
+                        continue;
+                    }
                     let v: Value = serde_json::from_str(&t)?;
                     if v.get("id").and_then(|i| i.as_u64()) == Some(1) {
                         if let Some(err) = v.get("error") {
@@ -431,8 +490,12 @@ impl TempoClient {
                         break;
                     }
                 }
-                Some(Ok(Message::Ping(d))) => { ws.send(Message::Pong(d)).await?; }
-                Some(Ok(other)) => { debug!("← unexpected: {other:?}"); }
+                Some(Ok(Message::Ping(d))) => {
+                    ws.send(Message::Pong(d)).await?;
+                }
+                Some(Ok(other)) => {
+                    debug!("← unexpected: {other:?}");
+                }
                 Some(Err(e)) => return Err(anyhow!("WS error: {e}")),
                 None => return Err(anyhow!("WS closed before ConnectResult")),
             }
@@ -489,17 +552,25 @@ impl TempoClient {
                     }
                     for line in t.lines() {
                         let line = line.trim();
-                        if line.is_empty() { continue; }
+                        if line.is_empty() {
+                            continue;
+                        }
                         let raw: Value = match serde_json::from_str(line) {
                             Ok(v) => v,
-                            Err(e) => { debug!("  parse error: {e}"); continue; }
+                            Err(e) => {
+                                debug!("  parse error: {e}");
+                                continue;
+                            }
                         };
 
                         // SubscribeResult (id=2)
                         if !subscribed && raw.get("id").and_then(|i| i.as_u64()) == Some(2) {
                             if let Some(err) = raw.get("error") {
                                 let code = err.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
-                                let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+                                let msg = err
+                                    .get("message")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("unknown");
                                 return Err(anyhow!("subscribe failed (code {code}): {msg}"));
                             }
                             subscribed = true;
@@ -507,16 +578,27 @@ impl TempoClient {
                         }
 
                         // Publication push
-                        let msg: ServerMsg = serde_json::from_value(raw).unwrap_or(ServerMsg { id: None, push: None });
+                        let msg: ServerMsg = serde_json::from_value(raw).unwrap_or(ServerMsg {
+                            id: None,
+                            push: None,
+                        });
                         if let Some(push) = msg.push {
                             if let Some(pub_msg) = push.publication {
                                 let (new_traces, state) = parse_frame(&pub_msg.data);
-                                if !new_traces.is_empty() { traces = new_traces; }
+                                if !new_traces.is_empty() {
+                                    traces = new_traces;
+                                }
                                 match state.as_str() {
-                                    "done" => { done = true; break; }
+                                    "done" => {
+                                        done = true;
+                                        break;
+                                    }
                                     "error" => {
-                                        let err = pub_msg.data.pointer("/data/values/3/0")
-                                            .and_then(|s| s.as_str()).unwrap_or("unknown");
+                                        let err = pub_msg
+                                            .data
+                                            .pointer("/data/values/3/0")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("unknown");
                                         return Err(anyhow!("{err}"));
                                     }
                                     _ => {}
@@ -524,10 +606,17 @@ impl TempoClient {
                             }
                         }
                     }
-                    if done { break 'outer; }
+                    if done {
+                        break 'outer;
+                    }
                 }
-                Some(Ok(Message::Ping(d))) => { ws.send(Message::Pong(d)).await?; }
-                Some(Ok(Message::Close(f))) => { debug!("← WS Close: {f:?}"); break; }
+                Some(Ok(Message::Ping(d))) => {
+                    ws.send(Message::Pong(d)).await?;
+                }
+                Some(Ok(Message::Close(f))) => {
+                    debug!("← WS Close: {f:?}");
+                    break;
+                }
                 Some(Err(e)) => return Err(anyhow!("WS error: {e}")),
                 None => break,
                 _ => {}
@@ -563,7 +652,10 @@ impl TempoClient {
 
         if resp.status().is_success() {
             let body_text = resp.text().await?;
-            debug!("← resources response (first 400 chars): {}", &body_text[..body_text.len().min(400)]);
+            debug!(
+                "← resources response (first 400 chars): {}",
+                &body_text[..body_text.len().min(400)]
+            );
             let body: Value = serde_json::from_str(&body_text)
                 .map_err(|e| anyhow!("resources response JSON parse error: {e}"))?;
             let spans = parse_otlp_trace(&body)?;
@@ -604,9 +696,7 @@ impl TempoClient {
         let ds_id = ds_info
             .get("id")
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| {
-                anyhow!("GET {resources_url} returned {first_status}: {first_body}")
-            })?;
+            .ok_or_else(|| anyhow!("GET {resources_url} returned {first_status}: {first_body}"))?;
 
         let proxy_url = format!(
             "{}/api/datasources/proxy/{}/api/traces/{}",
@@ -631,7 +721,10 @@ impl TempoClient {
         }
 
         let body_text = proxy_resp.text().await?;
-        debug!("← proxy response (first 400 chars): {}", &body_text[..body_text.len().min(400)]);
+        debug!(
+            "← proxy response (first 400 chars): {}",
+            &body_text[..body_text.len().min(400)]
+        );
         let body: Value = serde_json::from_str(&body_text)
             .map_err(|e| anyhow!("proxy response JSON parse error: {e}"))?;
         let spans = parse_otlp_trace(&body)?;
@@ -789,7 +882,8 @@ fn parse_otlp_trace(body: &Value) -> Result<Vec<TempoSpan>> {
                 .find(|k| obj.contains_key(**k))
                 .copied();
             if let Some(sk) = scope_key {
-                if let Some(span) = obj[sk].as_array()
+                if let Some(span) = obj[sk]
+                    .as_array()
                     .and_then(|a| a.first())
                     .and_then(|s| s.get("spans"))
                     .and_then(|s| s.as_array())
@@ -797,7 +891,11 @@ fn parse_otlp_trace(body: &Value) -> Result<Vec<TempoSpan>> {
                 {
                     if let Some(sobj) = span.as_object() {
                         debug!("  first span keys: {:?}", sobj.keys().collect::<Vec<_>>());
-                        debug!("  startTimeUnixNano = {:?}", sobj.get("startTimeUnixNano").or_else(|| sobj.get("start_time_unix_nano")));
+                        debug!(
+                            "  startTimeUnixNano = {:?}",
+                            sobj.get("startTimeUnixNano")
+                                .or_else(|| sobj.get("start_time_unix_nano"))
+                        );
                     }
                 }
             }

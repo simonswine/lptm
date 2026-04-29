@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use log::debug;
 use reqwest::Client;
 use shared::pyroscope::{FlameGraph, Level};
@@ -139,14 +139,22 @@ impl PyroscopeClient {
                     .iter()
                     .flat_map(|p| p.exemplars.iter())
                     .map(|e| shared::pyroscope::TimelineExemplar {
-                        labels: e.labels.iter().map(|l| (l.name.clone(), l.value.clone())).collect(),
+                        labels: e
+                            .labels
+                            .iter()
+                            .map(|l| (l.name.clone(), l.value.clone()))
+                            .collect(),
                         profile_id: e.profile_id.clone(),
                         span_id: e.span_id.clone(),
                         value: e.value,
                         timestamp_ms: e.timestamp,
                     })
                     .collect(),
-                points: s.points.into_iter().map(|p| (p.timestamp as f64, p.value)).collect(),
+                points: s
+                    .points
+                    .into_iter()
+                    .map(|p| (p.timestamp as f64, p.value))
+                    .collect(),
             })
             .collect())
     }
@@ -196,7 +204,11 @@ impl PyroscopeClient {
                     .exemplars
                     .iter()
                     .map(|e| shared::pyroscope::TimelineExemplar {
-                        labels: e.labels.iter().map(|l| (l.name.clone(), l.value.clone())).collect(),
+                        labels: e
+                            .labels
+                            .iter()
+                            .map(|l| (l.name.clone(), l.value.clone()))
+                            .collect(),
                         profile_id: e.profile_id.clone(),
                         span_id: e.span_id.clone(),
                         value: e.value,
@@ -215,7 +227,8 @@ impl PyroscopeClient {
         start: i64,
         end: i64,
     ) -> Result<Option<FlameGraph>> {
-        self.select_merge_stacktraces_inner(profile_type_id, service, start, end, None).await
+        self.select_merge_stacktraces_inner(profile_type_id, service, start, end, None)
+            .await
     }
 
     pub async fn select_merge_stacktraces_by_profile_id(
@@ -226,9 +239,8 @@ impl PyroscopeClient {
         end: i64,
         profile_id: &str,
     ) -> Result<Option<FlameGraph>> {
-        self.select_merge_stacktraces_inner(
-            profile_type_id, service, start, end, Some(profile_id),
-        ).await
+        self.select_merge_stacktraces_inner(profile_type_id, service, start, end, Some(profile_id))
+            .await
     }
 
     async fn select_merge_stacktraces_inner(
@@ -246,7 +258,9 @@ impl PyroscopeClient {
             end,
             max_nodes: None,
             format: ProfileFormat::PROFILE_FORMAT_FLAMEGRAPH.into(),
-            profile_id_selector: profile_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
+            profile_id_selector: profile_id
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default(),
             ..SelectMergeStacktracesRequest::default()
         };
         let resp: SelectMergeStacktracesResponse =

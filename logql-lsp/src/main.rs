@@ -10,7 +10,7 @@ use tower_lsp::{LspService, Server};
 async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let (service, socket) = LspService::build(|client| LogQLBackend::new(client))
+    let (service, socket) = LspService::build(LogQLBackend::new)
         .custom_method("loki/labelsUpdate", LogQLBackend::handle_labels_update)
         .custom_method(
             "loki/labelValuesUpdate",

@@ -52,7 +52,9 @@ impl LokiClient {
             "{}/api/datasources/proxy/{}/loki/api/v1/query_range",
             self.grafana_url, self.ds_id
         );
-        debug!("loki query_range: query={query} start={start_ns} end={end_ns} direction={direction}");
+        debug!(
+            "loki query_range: query={query} start={start_ns} end={end_ns} direction={direction}"
+        );
 
         let resp = self
             .http
@@ -181,10 +183,7 @@ impl LokiClient {
 fn format_labels(labels: &std::collections::HashMap<String, String>) -> String {
     let mut pairs: Vec<_> = labels.iter().collect();
     pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
-    let inner: Vec<String> = pairs
-        .iter()
-        .map(|(k, v)| format!("{k}={v:?}"))
-        .collect();
+    let inner: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}={v:?}")).collect();
     format!("{{{}}}", inner.join(", "))
 }
 

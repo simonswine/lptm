@@ -2,8 +2,8 @@ use crux_core::{render::render, Command};
 
 use crate::app::{Effect, Event, Model, Screen};
 use crate::time_range::{
-    encode_absolute, format_unix_s_utc, parse_datetime_utc_ns,
-    preset_index, resolve_range_s, PRESETS,
+    encode_absolute, format_unix_s_utc, parse_datetime_utc_ns, preset_index, resolve_range_s,
+    PRESETS,
 };
 
 pub const FOCUS_PRESETS: u8 = 0;
@@ -48,12 +48,7 @@ fn advance_after_overwrite(pos: usize) -> usize {
     if next >= DATETIME_LEN {
         return DATETIME_LEN - 1;
     }
-    if is_separator(next) {
-        next + 1
-    } else {
-        next
-    }
-    .min(DATETIME_LEN - 1)
+    if is_separator(next) { next + 1 } else { next }.min(DATETIME_LEN - 1)
 }
 
 /// Active cursor for the currently-focused field.
@@ -488,11 +483,11 @@ mod tests {
         // YYYY-MM-DD HH:MM:SS
         // 0123456789012345678
         //     ^  ^  ^  ^  ^
-        assert!(is_separator(4));   // '-'
-        assert!(is_separator(7));   // '-'
-        assert!(is_separator(10));  // ' '
-        assert!(is_separator(13));  // ':'
-        assert!(is_separator(16));  // ':'
+        assert!(is_separator(4)); // '-'
+        assert!(is_separator(7)); // '-'
+        assert!(is_separator(10)); // ' '
+        assert!(is_separator(13)); // ':'
+        assert!(is_separator(16)); // ':'
         assert!(!is_separator(0));
         assert!(!is_separator(5));
         assert!(!is_separator(18));

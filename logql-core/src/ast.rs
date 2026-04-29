@@ -115,10 +115,7 @@ pub enum PipelineStage {
         span: Span,
     },
     /// Line format: `| line_format "{{.msg}}"`
-    LineFormat {
-        template: String,
-        span: Span,
-    },
+    LineFormat { template: String, span: Span },
     /// Label operation: `| drop label1, label2` or `| keep label1`
     LabelOp {
         kind: LabelOpKind,

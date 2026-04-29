@@ -203,10 +203,7 @@ impl<'a> Parser<'a> {
                     _ => {
                         let tok = self.peek().clone();
                         self.errors.push(ParseError {
-                            message: format!(
-                                "unexpected identifier '{}'",
-                                self.text(&tok)
-                            ),
+                            message: format!("unexpected identifier '{}'", self.text(&tok)),
                             span: tok.span,
                         });
                         self.skip_to_sync();
@@ -577,10 +574,7 @@ impl<'a> Parser<'a> {
         let ident = self.text(&ident_tok).to_string();
 
         if self.at(TokenKind::LParen)
-            && matches!(
-                ident.as_str(),
-                "duration" | "duration_seconds" | "bytes"
-            )
+            && matches!(ident.as_str(), "duration" | "duration_seconds" | "bytes")
         {
             self.advance(); // consume (
             let label_tok = self.expect(TokenKind::Ident)?;
@@ -1503,10 +1497,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(op, "sum");
-                assert_eq!(
-                    grouping.as_ref().unwrap().labels,
-                    vec!["job"]
-                );
+                assert_eq!(grouping.as_ref().unwrap().labels, vec!["job"]);
                 match &inner.kind {
                     ExprKind::RangeAggregation {
                         func, log_query, ..
@@ -1525,8 +1516,7 @@ mod tests {
     #[test]
     fn mul_precedence_in_binary() {
         // a + b * c  should be a + (b * c)
-        let input =
-            r#"rate({a="1"}[5m]) + rate({b="2"}[5m]) * rate({c="3"}[5m])"#;
+        let input = r#"rate({a="1"}[5m]) + rate({b="2"}[5m]) * rate({c="3"}[5m])"#;
         let expr = parse_ok(input);
         match &expr.kind {
             ExprKind::BinOp { op, rhs, .. } => {
@@ -1576,7 +1566,13 @@ mod tests {
         let expr = result.expr.expect("expected partial AST");
         let (_, pipeline) = as_log_query(&expr);
         assert!(
-            pipeline.iter().any(|s| matches!(s, PipelineStage::Parser { kind: ParserKind::Json, .. })),
+            pipeline.iter().any(|s| matches!(
+                s,
+                PipelineStage::Parser {
+                    kind: ParserKind::Json,
+                    ..
+                }
+            )),
             "json should be parsed"
         );
     }
@@ -1763,7 +1759,13 @@ mod tests {
         let (sel, pipeline) = as_log_query(&expr);
         assert_eq!(sel.matchers[0].value, "syslog");
         assert_eq!(pipeline.len(), 3);
-        assert!(matches!(pipeline[0], PipelineStage::Parser { kind: ParserKind::Logfmt, .. }));
+        assert!(matches!(
+            pipeline[0],
+            PipelineStage::Parser {
+                kind: ParserKind::Logfmt,
+                ..
+            }
+        ));
         assert!(matches!(pipeline[1], PipelineStage::LabelFilter { .. }));
         assert!(matches!(pipeline[2], PipelineStage::LineFormat { .. }));
     }

@@ -273,10 +273,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 }
 
                 // Duration suffix check
-                let kind = if !is_float
-                    && pos < len
-                    && is_duration_suffix_start(bytes[pos])
-                {
+                let kind = if !is_float && pos < len && is_duration_suffix_start(bytes[pos]) {
                     let consumed = eat_duration_suffix(bytes, pos);
                     if consumed > 0 {
                         pos += consumed;
@@ -318,9 +315,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 
             // ── Identifiers and keywords ─────────────────────────────────
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
-                while pos < len
-                    && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
-                {
+                while pos < len && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
                     pos += 1;
                 }
                 tokens.push(Token {
@@ -577,11 +572,7 @@ mod tests {
             .iter()
             .map(|t| &input[t.span.start..t.span.end])
             .collect();
-        assert_eq!(
-            reconstructed, input,
-            "round-trip failed for {:?}",
-            input
-        );
+        assert_eq!(reconstructed, input, "round-trip failed for {:?}", input);
     }
 
     #[test]
@@ -751,7 +742,11 @@ mod tests {
             ("9y", "9y"),
         ] {
             let tokens = tok(input);
-            assert_eq!(tokens, vec![(TokenKind::Duration, expected)], "input: {input}");
+            assert_eq!(
+                tokens,
+                vec![(TokenKind::Duration, expected)],
+                "input: {input}"
+            );
         }
     }
 
@@ -834,7 +829,10 @@ mod tests {
     #[test]
     fn line_comment() {
         let tokens = tok("# this is a comment");
-        assert_eq!(tokens, vec![(TokenKind::LineComment, "# this is a comment")]);
+        assert_eq!(
+            tokens,
+            vec![(TokenKind::LineComment, "# this is a comment")]
+        );
     }
 
     #[test]
@@ -892,17 +890,17 @@ mod tests {
         let input = r#"rate({job="varlogs"} |= "error" [5m])"#;
         let tokens = tok(input);
         let expected_kinds = vec![
-            TokenKind::Ident,    // rate
-            TokenKind::LParen,   // (
-            TokenKind::LBrace,   // {
-            TokenKind::Ident,    // job
-            TokenKind::Eq,       // =
-            TokenKind::String,   // "varlogs"
-            TokenKind::RBrace,   // }
+            TokenKind::Ident,  // rate
+            TokenKind::LParen, // (
+            TokenKind::LBrace, // {
+            TokenKind::Ident,  // job
+            TokenKind::Eq,     // =
+            TokenKind::String, // "varlogs"
+            TokenKind::RBrace, // }
             TokenKind::Whitespace,
             TokenKind::PipeExact, // |=
             TokenKind::Whitespace,
-            TokenKind::String,   // "error"
+            TokenKind::String, // "error"
             TokenKind::Whitespace,
             TokenKind::LBracket, // [
             TokenKind::Duration, // 5m
@@ -925,7 +923,8 @@ mod tests {
 
     #[test]
     fn pipeline_with_multiple_stages() {
-        let input = r#"{job="app"} |= "error" != "timeout" |~ "5\\d{2}" | json | line_format "{{.msg}}""#;
+        let input =
+            r#"{job="app"} |= "error" != "timeout" |~ "5\\d{2}" | json | line_format "{{.msg}}""#;
         assert_round_trip(input);
     }
 
@@ -937,9 +936,9 @@ mod tests {
             TokenKind::PipeExact, // |=
             TokenKind::PipeMatch, // |~
             TokenKind::EqRegex,   // =~
-            TokenKind::CmpEq,    // ==
-            TokenKind::LtEq,     // <=
-            TokenKind::GtEq,     // >=
+            TokenKind::CmpEq,     // ==
+            TokenKind::LtEq,      // <=
+            TokenKind::GtEq,      // >=
         ];
         assert_eq!(kinds(input), expected);
         assert_round_trip(input);
@@ -950,8 +949,14 @@ mod tests {
     #[test]
     fn classify_range_functions() {
         assert_eq!(classify_keyword("rate"), KeywordKind::RangeFunction);
-        assert_eq!(classify_keyword("count_over_time"), KeywordKind::RangeFunction);
-        assert_eq!(classify_keyword("sum_over_time"), KeywordKind::RangeFunction);
+        assert_eq!(
+            classify_keyword("count_over_time"),
+            KeywordKind::RangeFunction
+        );
+        assert_eq!(
+            classify_keyword("sum_over_time"),
+            KeywordKind::RangeFunction
+        );
         assert_eq!(classify_keyword("bytes_rate"), KeywordKind::RangeFunction);
     }
 
@@ -966,7 +971,10 @@ mod tests {
     #[test]
     fn classify_aggregation_modifiers() {
         assert_eq!(classify_keyword("by"), KeywordKind::AggregationModifier);
-        assert_eq!(classify_keyword("without"), KeywordKind::AggregationModifier);
+        assert_eq!(
+            classify_keyword("without"),
+            KeywordKind::AggregationModifier
+        );
     }
 
     #[test]
@@ -987,8 +995,14 @@ mod tests {
 
     #[test]
     fn classify_pipeline_formatters() {
-        assert_eq!(classify_keyword("line_format"), KeywordKind::PipelineFormatter);
-        assert_eq!(classify_keyword("label_format"), KeywordKind::PipelineFormatter);
+        assert_eq!(
+            classify_keyword("line_format"),
+            KeywordKind::PipelineFormatter
+        );
+        assert_eq!(
+            classify_keyword("label_format"),
+            KeywordKind::PipelineFormatter
+        );
     }
 
     #[test]

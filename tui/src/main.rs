@@ -11,26 +11,23 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use clap::Parser;
-use log::info;
-use serde::{Deserialize, Serialize};
-use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, EventStream, KeyCode,
     KeyModifiers,
 };
 use crossterm::execute;
 use futures::StreamExt;
+use log::info;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState,
-    },
+    widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     DefaultTerminal, Frame,
 };
+use serde::{Deserialize, Serialize};
 use shared::{Event, HistoryEntryView, PyroscopeSubScreenView, ScreenView, ViewModel};
-use tui_textarea;
+use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};
 use tokio::{sync::mpsc, time::Instant};
 
 use crate::core::AppCore;
@@ -75,8 +72,12 @@ fn favourites_path() -> Option<std::path::PathBuf> {
 }
 
 fn load_favourites(url_hash: &str) -> Vec<String> {
-    let Some(path) = favourites_path() else { return vec![] };
-    let Ok(content) = std::fs::read_to_string(&path) else { return vec![] };
+    let Some(path) = favourites_path() else {
+        return vec![];
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return vec![];
+    };
     let Ok(map) = serde_json::from_str::<HashMap<String, Vec<String>>>(&content) else {
         return vec![];
     };
@@ -84,12 +85,13 @@ fn load_favourites(url_hash: &str) -> Vec<String> {
 }
 
 fn save_favourites(url_hash: &str, uids: &[String]) {
-    let Some(path) = favourites_path() else { return };
-    let mut map: HashMap<String, Vec<String>> =
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or_default();
+    let Some(path) = favourites_path() else {
+        return;
+    };
+    let mut map: HashMap<String, Vec<String>> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
     if uids.is_empty() {
         map.remove(url_hash);
     } else {
@@ -194,7 +196,11 @@ fn append_history(entry: &HistoryEntry) {
         return;
     };
     use std::io::Write;
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(file, "{}", line);
     }
 }
@@ -217,7 +223,10 @@ async fn main() -> Result<()> {
 enum TempoMsg {
     Result(Result<Vec<shared::TempoTrace>, String>),
     #[allow(dead_code)]
-    SpanTraceResult { span_id: String, trace_id: Option<String> },
+    SpanTraceResult {
+        span_id: String,
+        trace_id: Option<String>,
+    },
     SpanTraceBatch(std::collections::HashMap<String, String>),
     TraceDetail(Result<Vec<shared::TempoSpan>, String>),
     SpanTraceLoadingDone,
@@ -254,7 +263,10 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
     let mut reader = EventStream::new();
 
     let mut all_history = load_history();
-    app_core.update(Event::HistoryEntriesLoaded(history_views(&all_history, &url_hash)));
+    app_core.update(Event::HistoryEntriesLoaded(history_views(
+        &all_history,
+        &url_hash,
+    )));
     let mut history: Vec<String> = vec![];
     let mut history_pos: Option<usize> = None;
     let mut history_saved_query = String::new();
@@ -271,17 +283,18 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
     let mut loki_lsp: Option<loki::LspClient> = None;
     let mut loki_lsp_notif_rx: Option<mpsc::UnboundedReceiver<loki::LspNotification>> = None;
     // Channel carrying fetched label data back to the main loop.
-    let (loki_labels_tx, mut loki_labels_rx) =
-        mpsc::unbounded_channel::<(String, Vec<String>)>();          // (selector, names)
+    let (loki_labels_tx, mut loki_labels_rx) = mpsc::unbounded_channel::<(String, Vec<String>)>(); // (selector, names)
     let (loki_label_values_tx, mut loki_label_values_rx) =
-        mpsc::unbounded_channel::<(String, String, Vec<String>)>();  // (label, selector, values)
-    // The URI we use for the single Loki query document.
+        mpsc::unbounded_channel::<(String, String, Vec<String>)>(); // (label, selector, values)
+                                                                    // The URI we use for the single Loki query document.
     let loki_doc_uri = "file:///loki/query.logql";
 
     macro_rules! draw {
         ($term:expr, $vm:expr, $loki_state:expr) => {{
             let ls: Option<&loki::LokiUiState> = $loki_state;
-            $term.draw(|frame| { ui(frame, $vm, ls); })?;
+            $term.draw(|frame| {
+                ui(frame, $vm, ls);
+            })?;
         }};
     }
 
@@ -1614,9 +1627,9 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                         PyroscopeSubScreenView::Timeline
                         | PyroscopeSubScreenView::ProfileHeatmap
                         | PyroscopeSubScreenView::SpanHeatmap
-                    ) && (vm.timeline.as_ref().map_or(false, |t| !t.exemplars.is_empty())
-                        || vm.heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty())
-                        || vm.span_heatmap.as_ref().map_or(false, |h| !h.exemplars.is_empty()));
+                    ) && (vm.timeline.as_ref().is_some_and(|t| !t.exemplars.is_empty())
+                        || vm.heatmap.as_ref().is_some_and(|h| !h.exemplars.is_empty())
+                        || vm.span_heatmap.as_ref().is_some_and(|h| !h.exemplars.is_empty()));
                 if needs_redraw {
                     draw!(terminal, &vm, loki_ui_state.as_ref());
                 }
@@ -1630,6 +1643,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
 // ── Loki helpers ─────────────────────────────────────────────────────────────
 
 /// Initialize or re-initialize the Loki LSP server and UI state.
+#[allow(clippy::too_many_arguments)]
 async fn init_loki_state(
     loki_ui_state: &mut Option<loki::LokiUiState>,
     loki_lsp: &mut Option<loki::LspClient>,
@@ -1677,8 +1691,12 @@ async fn init_loki_state(
         tokio::spawn(async move {
             let client = loki::LokiClient::new(url, ds_id, token);
             match client.fetch_label_names("").await {
-                Ok(names) => { let _ = tx.send((String::new(), names)); }
-                Err(e) => { log::warn!("label fetch failed: {e}"); }
+                Ok(names) => {
+                    let _ = tx.send((String::new(), names));
+                }
+                Err(e) => {
+                    log::warn!("label fetch failed: {e}");
+                }
             }
         });
     }
@@ -1704,7 +1722,9 @@ fn accept_loki_completion(state: &mut loki::LokiUiState) {
             state.textarea.insert_char(c);
         }
         use tui_textarea::CursorMove;
-        state.textarea.move_cursor(CursorMove::Jump(0, new_col as u16));
+        state
+            .textarea
+            .move_cursor(CursorMove::Jump(0, new_col as u16));
         state.completions.clear();
         state.completion_index = None;
         state.completion_dismissed = false;
@@ -1724,8 +1744,13 @@ fn maybe_fetch_label_values(
 ) {
     use logql_core::completions::{detect_cursor_context, CursorContext};
     let ctx = detect_cursor_context(text, cursor_char);
-    if let CursorContext::LabelValue { label, selector, .. } = ctx {
-        if label.is_empty() { return; }
+    if let CursorContext::LabelValue {
+        label, selector, ..
+    } = ctx
+    {
+        if label.is_empty() {
+            return;
+        }
         if let Some(ds) = datasources.get(selected_index) {
             let url = grafana_url.to_string();
             let token = grafana_token.to_string();
@@ -1734,8 +1759,12 @@ fn maybe_fetch_label_values(
             tokio::spawn(async move {
                 let client = loki::LokiClient::new(url, ds_id, token);
                 match client.fetch_label_values(&label, &selector).await {
-                    Ok(values) => { let _ = tx.send((label, selector, values)); }
-                    Err(e) => { log::warn!("label values fetch failed: {e}"); }
+                    Ok(values) => {
+                        let _ = tx.send((label, selector, values));
+                    }
+                    Err(e) => {
+                        log::warn!("label values fetch failed: {e}");
+                    }
                 }
             });
         }
@@ -2045,7 +2074,11 @@ fn render_history_panel(frame: &mut Frame, vm: &ViewModel, area: Rect) {
     let list = List::new(items)
         .block(block)
         .highlight_symbol(">> ")
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
 
     let mut list_state = ListState::default();
     list_state.select(Some(vm.history_selected_index));
@@ -2061,14 +2094,17 @@ fn truncate_str(s: &str, max_chars: usize) -> &str {
 }
 
 fn render_datasource_bar(frame: &mut Frame, vm: &ViewModel, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Datasource ");
+    let block = Block::default().borders(Borders::ALL).title(" Datasource ");
 
     let content = if let Some(ds) = vm.datasources.get(vm.selected_index) {
         let default_tag = if ds.is_default { "  [default]" } else { "" };
         Line::from(vec![
-            Span::styled(ds.name.clone(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                ds.name.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  ·  "),
             Span::styled(ds.ds_type.clone(), Style::default().fg(Color::Cyan)),
             Span::raw("  ·  "),
@@ -2076,7 +2112,10 @@ fn render_datasource_bar(frame: &mut Frame, vm: &ViewModel, area: Rect) {
             Span::styled(default_tag, Style::default().fg(Color::Green)),
         ])
     } else {
-        Line::from(Span::styled("No datasource selected", Style::default().fg(Color::DarkGray)))
+        Line::from(Span::styled(
+            "No datasource selected",
+            Style::default().fg(Color::DarkGray),
+        ))
     };
 
     frame.render_widget(Paragraph::new(content).block(block), area);
@@ -2094,14 +2133,18 @@ fn spawn_series_fetch(
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        let window_ms = shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
+        let window_ms =
+            shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
-        let result = client.series(now_ms - window_ms, now_ms).await
+        let result = client
+            .series(now_ms - window_ms, now_ms)
+            .await
             .map_err(|e| e.to_string());
         let _ = tx.send(PyroscopeMsg::Series(result));
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_flamegraph_fetch(
     tx: &mpsc::UnboundedSender<PyroscopeMsg>,
     grafana_url: String,
@@ -2114,7 +2157,8 @@ fn spawn_flamegraph_fetch(
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        let window_ms = shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
+        let window_ms =
+            shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client
             .select_merge_stacktraces(&profile_type, &service, now_ms - window_ms, now_ms)
@@ -2124,6 +2168,7 @@ fn spawn_flamegraph_fetch(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_flamegraph_by_profile_id(
     tx: &mpsc::UnboundedSender<PyroscopeMsg>,
     grafana_url: String,
@@ -2137,11 +2182,16 @@ fn spawn_flamegraph_by_profile_id(
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        let window_ms = shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
+        let window_ms =
+            shared::time_range::parse_time_range(&time_range).unwrap_or(3600) as i64 * 1000;
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client
             .select_merge_stacktraces_by_profile_id(
-                &profile_type, &service, now_ms - window_ms, now_ms, &profile_id,
+                &profile_type,
+                &service,
+                now_ms - window_ms,
+                now_ms,
+                &profile_id,
             )
             .await
             .map_err(|e| e.to_string());
@@ -2149,6 +2199,7 @@ fn spawn_flamegraph_by_profile_id(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_timeline_fetch(
     tx: &mpsc::UnboundedSender<PyroscopeMsg>,
     grafana_url: String,
@@ -2168,13 +2219,21 @@ fn spawn_timeline_fetch(
         let step_s = (window_s / cols).max(15.0);
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client
-            .select_series(&profile_type, &service, now_ms - window_ms, now_ms, step_s, false)
+            .select_series(
+                &profile_type,
+                &service,
+                now_ms - window_ms,
+                now_ms,
+                step_s,
+                false,
+            )
             .await
             .map_err(|e| e.to_string());
         let _ = tx.send(PyroscopeMsg::Timeline(result));
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_heatmap_fetch(
     tx: &mpsc::UnboundedSender<PyroscopeMsg>,
     grafana_url: String,
@@ -2194,13 +2253,21 @@ fn spawn_heatmap_fetch(
         let step_s = (window_s / cols).max(15.0);
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client
-            .select_heatmap(&profile_type, &service, now_ms - window_ms, now_ms, step_s, false)
+            .select_heatmap(
+                &profile_type,
+                &service,
+                now_ms - window_ms,
+                now_ms,
+                step_s,
+                false,
+            )
             .await
             .map_err(|e| e.to_string());
         let _ = tx.send(PyroscopeMsg::Heatmap(result));
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_span_heatmap_fetch(
     tx: &mpsc::UnboundedSender<PyroscopeMsg>,
     grafana_url: String,
@@ -2220,7 +2287,14 @@ fn spawn_span_heatmap_fetch(
         let step_s = (window_s / cols).max(15.0);
         let client = pyroscope::PyroscopeClient::new(grafana_url, ds_id, token);
         let result = client
-            .select_heatmap(&profile_type, &service, now_ms - window_ms, now_ms, step_s, true)
+            .select_heatmap(
+                &profile_type,
+                &service,
+                now_ms - window_ms,
+                now_ms,
+                step_s,
+                true,
+            )
             .await
             .map_err(|e| e.to_string());
         let _ = tx2.send(PyroscopeMsg::SpanHeatmap(result));
@@ -2244,9 +2318,11 @@ fn spawn_span_traces_fetch(
         let end_s = (end_ms / 1000).max(0) as u64;
         let client = tempo::TempoClient::new(grafana_url, uid, token);
         let tx2 = tx.clone();
-        let result = client.traces_for_span_ids(&span_ids, start_s, end_s, |batch| {
-            let _ = tx2.send(TempoMsg::SpanTraceBatch(batch));
-        }).await;
+        let result = client
+            .traces_for_span_ids(&span_ids, start_s, end_s, |batch| {
+                let _ = tx2.send(TempoMsg::SpanTraceBatch(batch));
+            })
+            .await;
         if let Err(e) = result {
             log::warn!("span→trace batch lookup failed: {e}");
         }
@@ -2264,7 +2340,10 @@ fn spawn_trace_detail_fetch(
     let tx = tx.clone();
     tokio::spawn(async move {
         let client = tempo::TempoClient::new(grafana_url, uid, token);
-        let result = client.fetch_trace(&trace_id).await.map_err(|e| e.to_string());
+        let result = client
+            .fetch_trace(&trace_id)
+            .await
+            .map_err(|e| e.to_string());
         let _ = tx.send(TempoMsg::TraceDetail(result));
     });
 }
@@ -2285,7 +2364,10 @@ fn spawn_tempo_search(
             .as_secs();
         let (start_s, end_s) = shared::time_range::resolve_range_s(&time_range, now_s);
         let client = tempo::TempoClient::new(grafana_url, uid, token);
-        let result = client.search(&query, start_s, end_s).await.map_err(|e| e.to_string());
+        let result = client
+            .search(&query, start_s, end_s)
+            .await
+            .map_err(|e| e.to_string());
         let _ = tx.send(TempoMsg::Result(result));
     });
 }
@@ -2332,7 +2414,13 @@ fn spawn_loki_context_query(
 
         // Query lines BEFORE (inclusive of selected): end=ts, direction=backward
         let before_result = client
-            .query_range(&labels, ts.saturating_sub(3600 * 1_000_000_000), ts, context_lines, "backward")
+            .query_range(
+                &labels,
+                ts.saturating_sub(3600 * 1_000_000_000),
+                ts,
+                context_lines,
+                "backward",
+            )
             .await;
 
         // Query lines AFTER (inclusive of selected): start=ts, direction=forward
@@ -2344,17 +2432,13 @@ fn spawn_loki_context_query(
         let result = match (before_result, after_result) {
             (Ok(before_streams), Ok(after_streams)) => {
                 // Flatten and collect entries from the before query (newest-first → reverse to oldest-first)
-                let mut before_entries: Vec<shared::loki::LokiEntry> = before_streams
-                    .into_iter()
-                    .flat_map(|s| s.entries)
-                    .collect();
+                let mut before_entries: Vec<shared::loki::LokiEntry> =
+                    before_streams.into_iter().flat_map(|s| s.entries).collect();
                 before_entries.reverse();
 
                 // Flatten after entries (already oldest-first in forward mode)
-                let after_entries: Vec<shared::loki::LokiEntry> = after_streams
-                    .into_iter()
-                    .flat_map(|s| s.entries)
-                    .collect();
+                let after_entries: Vec<shared::loki::LokiEntry> =
+                    after_streams.into_iter().flat_map(|s| s.entries).collect();
 
                 // The selected line appears in both results (at ts boundary).
                 // before_entries ends with the selected line, after_entries starts with it.

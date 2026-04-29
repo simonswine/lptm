@@ -15,12 +15,19 @@ pub fn render_tempo_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
 
     let before = &vm.tempo_query[..vm.tempo_cursor_pos];
     let after = &vm.tempo_query[vm.tempo_cursor_pos..];
-    let cursor_char = after.chars().next().map(|c| c.to_string()).unwrap_or_else(|| " ".into());
+    let cursor_char = after
+        .chars()
+        .next()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| " ".into());
     let after_cursor: String = after.chars().skip(1).collect();
 
     let query_line = Line::from(vec![
         Span::raw(before.to_owned()),
-        Span::styled(cursor_char, Style::default().fg(Color::Black).bg(Color::White)),
+        Span::styled(
+            cursor_char,
+            Style::default().fg(Color::Black).bg(Color::White),
+        ),
         Span::raw(after_cursor),
     ]);
     frame.render_widget(Paragraph::new(query_line).block(query_block), split[0]);
@@ -30,15 +37,15 @@ pub fn render_tempo_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         .borders(Borders::ALL)
         .title(Line::from(vec![
             Span::raw(" Traces — "),
-            Span::styled(display_label(&vm.time_range), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                display_label(&vm.time_range),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw(" "),
         ]));
 
     if vm.tempo_loading {
-        frame.render_widget(
-            Paragraph::new("Searching…").block(results_block),
-            split[1],
-        );
+        frame.render_widget(Paragraph::new("Searching…").block(results_block), split[1]);
         return;
     }
 
@@ -67,9 +74,17 @@ pub fn render_tempo_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         return;
     }
 
-    let header = Row::new(["TraceID", "Service", "Operation", "Duration"].iter().map(|h| {
-        Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-    }));
+    let header = Row::new(
+        ["TraceID", "Service", "Operation", "Duration"]
+            .iter()
+            .map(|h| {
+                Cell::from(*h).style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            }),
+    );
 
     let rows: Vec<Row> = vm
         .tempo_results
@@ -106,7 +121,9 @@ pub fn render_tempo_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         .block(results_block)
         .highlight_symbol(">> ")
         .row_highlight_style(
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         );
 
     let mut table_state = TableState::default();
@@ -145,7 +162,9 @@ pub fn render_trace_detail_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         );
     let dur_str = format_duration_ns(total_dur_ns);
     let summary_text = format!("Trace: {tid}  ({span_count} spans, {dur_str})");
-    let summary_block = Block::default().borders(Borders::ALL).title(" Trace Detail ");
+    let summary_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Trace Detail ");
     frame.render_widget(
         Paragraph::new(summary_text).block(summary_block),
         summary_area,
@@ -222,9 +241,15 @@ pub fn render_trace_detail_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         );
     } else {
         let header = Row::new(
-            ["Service", "Span Name", "Duration", "Timeline"].iter().map(|h| {
-                Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            }),
+            ["Service", "Span Name", "Duration", "Timeline"]
+                .iter()
+                .map(|h| {
+                    Cell::from(*h).style(
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                }),
         );
 
         const TIMELINE_WIDTH: usize = 26;
@@ -272,7 +297,9 @@ pub fn render_trace_detail_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
             .header(header)
             .highlight_symbol(">> ")
             .row_highlight_style(
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             );
 
         let mut table_state = TableState::default();
@@ -309,7 +336,10 @@ pub fn render_trace_detail_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         ];
         if span.error {
             first_spans.push(Span::raw("  "));
-            first_spans.push(Span::styled("ERROR", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+            first_spans.push(Span::styled(
+                "ERROR",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
         }
         lines.push(Line::from(first_spans));
 
@@ -329,7 +359,9 @@ pub fn render_trace_detail_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         }
 
         let total_lines = lines.len();
-        let scroll = vm.trace_detail_attr_scroll.min(total_lines.saturating_sub(1));
+        let scroll = vm
+            .trace_detail_attr_scroll
+            .min(total_lines.saturating_sub(1));
 
         // Show ▼ in title when there is more content below
         let visible_lines = detail_area.height.saturating_sub(2) as usize; // -2 for borders
@@ -351,7 +383,11 @@ pub fn render_trace_detail_mode(frame: &mut Frame, vm: &ViewModel, area: Rect) {
         frame.render_widget(
             Paragraph::new("Select a span to view attributes.")
                 .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().borders(Borders::ALL).title(" Span Attributes ")),
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Span Attributes "),
+                ),
             detail_area,
         );
     }
@@ -372,9 +408,9 @@ fn render_timeline_bar(
     let w = width as f64;
     let bar_start =
         ((span_start.saturating_sub(trace_start)) as f64 / trace_total as f64 * w) as usize;
-    let bar_end =
-        ((span_start.saturating_sub(trace_start) + duration_ns) as f64 / trace_total as f64 * w)
-            as usize;
+    let bar_end = ((span_start.saturating_sub(trace_start) + duration_ns) as f64
+        / trace_total as f64
+        * w) as usize;
     let bar_start = bar_start.min(width);
     let bar_end = bar_end.min(width).max(bar_start + 1);
 

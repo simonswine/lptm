@@ -156,10 +156,7 @@ pub fn detect_cursor_context(query: &str, cursor_pos: usize) -> CursorContext {
             if let Some(tok) = last_sig {
                 if matches!(
                     tok.kind,
-                    TokenKind::Eq
-                        | TokenKind::EqRegex
-                        | TokenKind::NotEqual
-                        | TokenKind::NotMatch
+                    TokenKind::Eq | TokenKind::EqRegex | TokenKind::NotEqual | TokenKind::NotMatch
                 ) {
                     return CursorContext::None;
                 }
@@ -476,10 +473,7 @@ fn function_docs(name: &str) -> Option<(&'static str, &'static str)> {
             "Range function",
             "Counts the bytes of log entries over the given range",
         ),
-        "bytes_rate" => (
-            "Range function",
-            "Per-second byte rate of log entries",
-        ),
+        "bytes_rate" => ("Range function", "Per-second byte rate of log entries"),
         "absent_over_time" => (
             "Range function",
             "Returns 1 if the range vector has no entries, empty otherwise",
@@ -489,10 +483,7 @@ fn function_docs(name: &str) -> Option<(&'static str, &'static str)> {
         "avg" => ("Aggregation", "Calculate the average over dimensions"),
         "min" => ("Aggregation", "Select minimum over dimensions"),
         "max" => ("Aggregation", "Select maximum over dimensions"),
-        "count" => (
-            "Aggregation",
-            "Count number of elements in the vector",
-        ),
+        "count" => ("Aggregation", "Count number of elements in the vector"),
         "topk" => ("Aggregation", "Largest k elements by value"),
         "bottomk" => ("Aggregation", "Smallest k elements by value"),
         "stddev" => (
@@ -516,10 +507,7 @@ fn pipeline_docs(name: &str) -> Option<(&'static str, &'static str)> {
             "Parser",
             "Parse log lines as JSON, extracting fields as labels",
         ),
-        "logfmt" => (
-            "Parser",
-            "Parse log lines as logfmt key=value pairs",
-        ),
+        "logfmt" => ("Parser", "Parse log lines as logfmt key=value pairs"),
         "pattern" => (
             "Parser",
             "Extract fields using a pattern expression: pattern \"<ip> - <_>\"",
@@ -528,14 +516,8 @@ fn pipeline_docs(name: &str) -> Option<(&'static str, &'static str)> {
             "Parser",
             "Extract fields using a regular expression with named capture groups",
         ),
-        "unpack" => (
-            "Parser",
-            "Unpack packed log entries (used with pack stage)",
-        ),
-        "pack" => (
-            "Parser",
-            "Pack log entry and labels into a JSON object",
-        ),
+        "unpack" => ("Parser", "Unpack packed log entries (used with pack stage)"),
+        "pack" => ("Parser", "Pack log entry and labels into a JSON object"),
         "line_format" => (
             "Formatter",
             "Rewrite the log line using a Go template: line_format \"{{.field}}\"",
@@ -544,10 +526,7 @@ fn pipeline_docs(name: &str) -> Option<(&'static str, &'static str)> {
             "Formatter",
             "Rename, modify, or add labels: label_format dst=src",
         ),
-        "drop" => (
-            "Label operation",
-            "Remove specified labels from the stream",
-        ),
+        "drop" => ("Label operation", "Remove specified labels from the stream"),
         "keep" => (
             "Label operation",
             "Keep only the specified labels, removing all others",
@@ -688,7 +667,11 @@ fn complete_expression(prefix: &str, max: usize) -> Vec<CompletionItem> {
         }
     }
 
-    items.sort_by(|a, b| a.sort_priority.cmp(&b.sort_priority).then(a.label.cmp(&b.label)));
+    items.sort_by(|a, b| {
+        a.sort_priority
+            .cmp(&b.sort_priority)
+            .then(a.label.cmp(&b.label))
+    });
     items.dedup_by(|a, b| a.label == b.label);
     items.truncate(max);
     items
@@ -859,9 +842,7 @@ mod tests {
     #[test]
     fn context_label_value_empty_prefix() {
         match ctx(r#"{job=""#, 6) {
-            CursorContext::LabelValue {
-                label, prefix, ..
-            } => {
+            CursorContext::LabelValue { label, prefix, .. } => {
                 assert_eq!(label, "job");
                 assert!(prefix.is_empty());
             }
@@ -872,9 +853,7 @@ mod tests {
     #[test]
     fn context_label_value_regex_operator() {
         match ctx(r#"{job=~"no"#, 9) {
-            CursorContext::LabelValue {
-                label, prefix, ..
-            } => {
+            CursorContext::LabelValue { label, prefix, .. } => {
                 assert_eq!(label, "job");
                 assert_eq!(prefix, "no");
             }
@@ -1028,11 +1007,7 @@ mod tests {
         let mut cache: HashMap<(String, String), Vec<String>> = HashMap::new();
         cache.insert(
             ("job".into(), String::new()),
-            vec![
-                "node".into(),
-                "prometheus".into(),
-                "alertmanager".into(),
-            ],
+            vec!["node".into(), "prometheus".into(), "alertmanager".into()],
         );
         let c = CursorContext::LabelValue {
             label: "job".into(),
@@ -1078,11 +1053,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].detail.as_deref(), Some("Parser"));
         assert!(result[0].documentation.is_some());
-        assert!(result[0]
-            .documentation
-            .as_ref()
-            .unwrap()
-            .contains("JSON"));
+        assert!(result[0].documentation.as_ref().unwrap().contains("JSON"));
     }
 
     #[test]
@@ -1141,9 +1112,7 @@ mod tests {
 
     #[test]
     fn complete_expression_semantic_ranking() {
-        let c = CursorContext::Expression {
-            prefix: "s".into(),
-        };
+        let c = CursorContext::Expression { prefix: "s".into() };
         let result = items(&c, &HashMap::new(), &HashMap::new(), 30);
         // Range functions should come before aggregation ops
         let sum_over_time_idx = result
@@ -1183,9 +1152,7 @@ mod tests {
 
     #[test]
     fn complete_durations_filtered() {
-        let c = CursorContext::Duration {
-            prefix: "1".into(),
-        };
+        let c = CursorContext::Duration { prefix: "1".into() };
         let result = items(&c, &HashMap::new(), &HashMap::new(), 20);
         let l = labels(&result);
         assert!(l.contains(&"1m".to_string()));

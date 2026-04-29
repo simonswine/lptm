@@ -64,9 +64,7 @@ impl LspClient {
                 LogQLBackend::handle_label_values_update,
             )
             .finish();
-        tokio::spawn(
-            Server::new(client_to_server_r, server_to_client_w, socket).serve(service),
-        );
+        tokio::spawn(Server::new(client_to_server_r, server_to_client_w, socket).serve(service));
 
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -76,9 +74,7 @@ impl LspClient {
         let pending_clone = Arc::clone(&pending);
         let notif_tx_clone = notif_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                read_loop(server_to_client_r, pending_clone, notif_tx_clone).await
-            {
+            if let Err(e) = read_loop(server_to_client_r, pending_clone, notif_tx_clone).await {
                 warn!("LSP read loop ended: {e}");
             }
         });
@@ -92,9 +88,7 @@ impl LspClient {
 
         // Perform LSP initialization handshake.
         client.initialize().await?;
-        client
-            .send_notification("initialized", json!({}))
-            .await?;
+        client.send_notification("initialized", json!({})).await?;
 
         Ok((client, notif_rx))
     }
@@ -155,12 +149,7 @@ impl LspClient {
 
     // ── Completions ───────────────────────────────────────────────────────────
 
-    pub async fn completion(
-        &self,
-        uri: &str,
-        line: u32,
-        character: u32,
-    ) -> Vec<CompletionItem> {
+    pub async fn completion(&self, uri: &str, line: u32, character: u32) -> Vec<CompletionItem> {
         let result = self
             .send_request(
                 "textDocument/completion",
@@ -264,16 +253,17 @@ fn parse_completion_response(val: Value) -> Vec<CompletionItem> {
         .iter()
         .filter_map(|item| {
             let label = item.get("label")?.as_str()?.to_string();
-            let detail = item.get("detail").and_then(|v| v.as_str()).map(str::to_string);
-            let documentation = item
-                .get("documentation")
-                .and_then(|v| {
-                    if v.is_string() {
-                        v.as_str().map(str::to_string)
-                    } else {
-                        v.get("value").and_then(|v| v.as_str()).map(str::to_string)
-                    }
-                });
+            let detail = item
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let documentation = item.get("documentation").and_then(|v| {
+                if v.is_string() {
+                    v.as_str().map(str::to_string)
+                } else {
+                    v.get("value").and_then(|v| v.as_str()).map(str::to_string)
+                }
+            });
 
             let kind_num = item.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
             let kind_icon = lsp_kind_icon(kind_num);
@@ -350,10 +340,7 @@ fn lsp_kind_icon(kind: u64) -> &'static str {
 // ── LSP wire format helpers ───────────────────────────────────────────────────
 
 /// Write a single JSON-RPC message with `Content-Length` framing.
-async fn write_lsp_message(
-    w: &mut tokio::io::DuplexStream,
-    msg: &Value,
-) -> Result<()> {
+async fn write_lsp_message(w: &mut tokio::io::DuplexStream, msg: &Value) -> Result<()> {
     let body = serde_json::to_vec(msg)?;
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
     w.write_all(header.as_bytes()).await?;
@@ -409,14 +396,14 @@ async fn dispatch_message(
     pending: &Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
     notif_tx: &mpsc::UnboundedSender<LspNotification>,
 ) {
-    let method = msg.get("method").and_then(|m| m.as_str()).map(str::to_string);
+    let method = msg
+        .get("method")
+        .and_then(|m| m.as_str())
+        .map(str::to_string);
 
     if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
         // It's a response to one of our requests.
-        let result = msg
-            .get("result")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let result = msg.get("result").cloned().unwrap_or(Value::Null);
         if let Some(tx) = pending.lock().await.remove(&id) {
             let _ = tx.send(result);
         }

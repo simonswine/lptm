@@ -8,6 +8,7 @@ use crux_core::{
 use crux_http::{command::Http, protocol::HttpRequest};
 use serde::{Deserialize, Serialize};
 
+use crate::loki::LokiStream;
 use crate::prometheus::types::{
     PrometheusResponse, PrometheusStringListResponse, PrometheusVectorItem,
 };
@@ -15,7 +16,6 @@ use crate::pyroscope::{
     build_flamegraph_view, build_sandwich_view, FlameGraph, FlamegraphNav, FlamegraphView,
     SandwichView,
 };
-use crate::loki::LokiStream;
 use crate::tempo::{TempoSpan, TempoTrace};
 
 #[effect]
@@ -49,7 +49,10 @@ pub struct PyroscopeSeriesItem {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Event {
-    Configure { url: String, token: String },
+    Configure {
+        url: String,
+        token: String,
+    },
     FetchDatasources,
     SelectNext,
     SelectPrevious,
@@ -80,9 +83,7 @@ pub enum Event {
     DatasourceFilterClear,
 
     // Autocomplete
-    MetricNamesLoaded(
-        crux_http::Result<crux_http::Response<PrometheusStringListResponse>>,
-    ),
+    MetricNamesLoaded(crux_http::Result<crux_http::Response<PrometheusStringListResponse>>),
     LabelNamesLoaded(
         String, // selector used when fetching (empty = unfiltered initial load)
         crux_http::Result<crux_http::Response<PrometheusStringListResponse>>,
@@ -101,17 +102,24 @@ pub enum Event {
     HistoryNavigate(String),
 
     // Pyroscope mode
-    EnterPyroscope { now_unix_ms: i64 },
+    EnterPyroscope {
+        now_unix_ms: i64,
+    },
     /// History restore: skip series loading and go directly to the flamegraph
     /// for a known service + profile_type.
-    PyroscopeDirectLoad { service_name: String, profile_type: String },
+    PyroscopeDirectLoad {
+        service_name: String,
+        profile_type: String,
+    },
 
     PyroscopeSeriesNext,
     PyroscopeSeriesPrev,
     PyroscopeSeriesLoaded(Result<Vec<(String, String)>, String>),
 
     // Time range picker (global, all 4 signals)
-    TimeRangePickerOpen { now_unix_ms: i64 },
+    TimeRangePickerOpen {
+        now_unix_ms: i64,
+    },
     TimeRangePickerClose,
     TimeRangePickerNext,
     TimeRangePickerPrev,
@@ -120,7 +128,9 @@ pub enum Event {
     TimeRangePickerCustomBackspace,
     TimeRangePickerCursorLeft,
     TimeRangePickerCursorRight,
-    TimeRangePickerCommit { now_unix_ms: i64 },
+    TimeRangePickerCommit {
+        now_unix_ms: i64,
+    },
 
     PyroscopeProfileTypeNext,
     PyroscopeProfileTypePrev,
@@ -133,11 +143,16 @@ pub enum Event {
     PyroscopeServiceFilterBackspace,
     PyroscopeServiceFilterClear,
 
-    PyroscopeSelectSeries { now_unix_ms: i64 },
+    PyroscopeSelectSeries {
+        now_unix_ms: i64,
+    },
     /// Restore a history entry: directly set the time-range without triggering a reload.
     PyroscopeSetTimeRange(String),
     /// After series are loaded, select the service+profile_type that matches a history entry.
-    PyroscopeSelectByName { service_name: String, profile_type: String },
+    PyroscopeSelectByName {
+        service_name: String,
+        profile_type: String,
+    },
     PyroscopeFlamegraphLoaded(Result<Option<FlameGraph>, String>),
     PyroscopeTimelineLoaded(Result<Vec<crate::pyroscope::TimelineSeries>, String>),
     PyroscopeHeatmapLoaded(Result<Vec<crate::pyroscope::HeatmapSlot>, String>),
@@ -158,7 +173,10 @@ pub enum Event {
     SpanHeatmapClearResults,
     SpanHeatmapTempoLoadingStarted,
     SpanHeatmapTempoLoadingDone,
-    SpanHeatmapTempoResultLoaded { span_id: String, trace_id: String },
+    SpanHeatmapTempoResultLoaded {
+        span_id: String,
+        trace_id: String,
+    },
     SpanHeatmapTempoBatchLoaded(HashMap<String, String>),
 
     BackToServiceList,
@@ -187,7 +205,10 @@ pub enum Event {
     HistorySelectNext,
     HistorySelectPrev,
     /// Select a datasource by UID (preferred) with a name fallback for older history entries.
-    SelectDatasource { uid: String, name: String },
+    SelectDatasource {
+        uid: String,
+        name: String,
+    },
 
     // Tempo mode
     EnterTempo,
@@ -307,10 +328,10 @@ pub struct Model {
     pub time_range_picker_index: usize,
     /// Focus: 0 = preset list, 1 = absolute From, 2 = absolute To
     pub time_range_picker_focus: u8,
-    pub time_range_picker_abs_from: String,       // "YYYY-MM-DD HH:MM:SS"
-    pub time_range_picker_abs_to: String,         // "YYYY-MM-DD HH:MM:SS"
-    pub time_range_picker_from_cursor: usize,     // byte cursor within abs_from
-    pub time_range_picker_to_cursor: usize,       // byte cursor within abs_to
+    pub time_range_picker_abs_from: String, // "YYYY-MM-DD HH:MM:SS"
+    pub time_range_picker_abs_to: String,   // "YYYY-MM-DD HH:MM:SS"
+    pub time_range_picker_from_cursor: usize, // byte cursor within abs_from
+    pub time_range_picker_to_cursor: usize, // byte cursor within abs_to
 
     // Pyroscope state
     pub pyroscope_sub_screen: PyroscopeSubScreen,
@@ -646,8 +667,7 @@ impl App for ExploreTui {
                 if model.screen == Screen::DatasourceList {
                     let count = filtered_datasource_indices(model).len();
                     if count > 0 {
-                        model.selected_index =
-                            (model.selected_index + count - 1) % count;
+                        model.selected_index = (model.selected_index + count - 1) % count;
                     }
                 }
                 render()
@@ -685,7 +705,6 @@ impl App for ExploreTui {
             }
 
             // ── Prometheus ────────────────────────────────────────────────────
-
             Event::EnterQuery => crate::prometheus::app::handle_enter_query(model),
             Event::QueryInput(c) => crate::prometheus::app::handle_query_input(model, c),
             Event::QueryBackspace => crate::prometheus::app::handle_query_backspace(model),
@@ -718,15 +737,15 @@ impl App for ExploreTui {
             }
 
             // ── Pyroscope ─────────────────────────────────────────────────────
-
             Event::EnterPyroscope { .. } => crate::pyroscope::app::handle_enter_pyroscope(model),
-            Event::PyroscopeDirectLoad { service_name, profile_type } => {
-                crate::pyroscope::app::handle_pyroscope_direct_load(
-                    model,
-                    service_name,
-                    profile_type,
-                )
-            }
+            Event::PyroscopeDirectLoad {
+                service_name,
+                profile_type,
+            } => crate::pyroscope::app::handle_pyroscope_direct_load(
+                model,
+                service_name,
+                profile_type,
+            ),
             Event::PyroscopeSeriesLoaded(result) => {
                 crate::pyroscope::app::handle_pyroscope_series_loaded(model, result)
             }
@@ -739,15 +758,9 @@ impl App for ExploreTui {
             Event::TimeRangePickerOpen { now_unix_ms } => {
                 crate::time_range_picker::handle_open(model, now_unix_ms)
             }
-            Event::TimeRangePickerClose => {
-                crate::time_range_picker::handle_close(model)
-            }
-            Event::TimeRangePickerNext => {
-                crate::time_range_picker::handle_next(model)
-            }
-            Event::TimeRangePickerPrev => {
-                crate::time_range_picker::handle_prev(model)
-            }
+            Event::TimeRangePickerClose => crate::time_range_picker::handle_close(model),
+            Event::TimeRangePickerNext => crate::time_range_picker::handle_next(model),
+            Event::TimeRangePickerPrev => crate::time_range_picker::handle_prev(model),
             Event::TimeRangePickerToggleFocus => {
                 crate::time_range_picker::handle_toggle_focus(model)
             }
@@ -757,9 +770,7 @@ impl App for ExploreTui {
             Event::TimeRangePickerCustomBackspace => {
                 crate::time_range_picker::handle_custom_backspace(model)
             }
-            Event::TimeRangePickerCursorLeft => {
-                crate::time_range_picker::handle_cursor_left(model)
-            }
+            Event::TimeRangePickerCursorLeft => crate::time_range_picker::handle_cursor_left(model),
             Event::TimeRangePickerCursorRight => {
                 crate::time_range_picker::handle_cursor_right(model)
             }
@@ -804,13 +815,14 @@ impl App for ExploreTui {
             Event::PyroscopeSetTimeRange(range) => {
                 crate::pyroscope::app::handle_pyroscope_set_time_range(model, range)
             }
-            Event::PyroscopeSelectByName { service_name, profile_type } => {
-                crate::pyroscope::app::handle_pyroscope_select_by_name(
-                    model,
-                    service_name,
-                    profile_type,
-                )
-            }
+            Event::PyroscopeSelectByName {
+                service_name,
+                profile_type,
+            } => crate::pyroscope::app::handle_pyroscope_select_by_name(
+                model,
+                service_name,
+                profile_type,
+            ),
             Event::PyroscopeFlamegraphLoaded(result) => {
                 model.sandwich_name = None;
                 crate::pyroscope::app::handle_pyroscope_flamegraph_loaded(model, result)
@@ -827,12 +839,8 @@ impl App for ExploreTui {
             Event::PyroscopeSelectView(idx) => {
                 crate::pyroscope::app::handle_pyroscope_select_view(model, idx)
             }
-            Event::ExemplarSelectNext => {
-                crate::pyroscope::app::handle_exemplar_select_next(model)
-            }
-            Event::ExemplarSelectPrev => {
-                crate::pyroscope::app::handle_exemplar_select_prev(model)
-            }
+            Event::ExemplarSelectNext => crate::pyroscope::app::handle_exemplar_select_next(model),
+            Event::ExemplarSelectPrev => crate::pyroscope::app::handle_exemplar_select_prev(model),
             Event::ExemplarDetailOpen => {
                 model.exemplar_detail_open = true;
                 render()
@@ -863,14 +871,22 @@ impl App for ExploreTui {
                 render()
             }
             Event::SpanHeatmapTempoPickerNext => {
-                let n = model.datasources.iter().filter(|d| d.ds_type == "tempo").count();
+                let n = model
+                    .datasources
+                    .iter()
+                    .filter(|d| d.ds_type == "tempo")
+                    .count();
                 if n > 0 {
                     model.tempo_picker_index = (model.tempo_picker_index + 1) % n;
                 }
                 render()
             }
             Event::SpanHeatmapTempoPickerPrev => {
-                let n = model.datasources.iter().filter(|d| d.ds_type == "tempo").count();
+                let n = model
+                    .datasources
+                    .iter()
+                    .filter(|d| d.ds_type == "tempo")
+                    .count();
                 if n > 0 {
                     model.tempo_picker_index = (model.tempo_picker_index + n - 1) % n;
                 }
@@ -904,7 +920,10 @@ impl App for ExploreTui {
                         .get(model.flamegraph_nav.sel_level)
                         .and_then(|lv| {
                             let i = model.flamegraph_nav.sel_frame * 4 + 3;
-                            lv.values.get(i).and_then(|&ni| fg.names.get(ni as usize)).cloned()
+                            lv.values
+                                .get(i)
+                                .and_then(|&ni| fg.names.get(ni as usize))
+                                .cloned()
                         });
                     if let Some(name) = name {
                         if model.sandwich_name.as_deref() == Some(&name) {
@@ -960,14 +979,12 @@ impl App for ExploreTui {
             Event::HistorySelectPrev => {
                 let len = model.history_entries.len();
                 if len > 0 {
-                    model.history_selected_index =
-                        (model.history_selected_index + len - 1) % len;
+                    model.history_selected_index = (model.history_selected_index + len - 1) % len;
                 }
                 render()
             }
 
             // ── Tempo ─────────────────────────────────────────────────────────
-
             Event::EnterTempo => crate::tempo::app::handle_enter_tempo(model),
             Event::TempoQueryInput(c) => crate::tempo::app::handle_tempo_query_input(model, c),
             Event::TempoQueryBackspace => crate::tempo::app::handle_tempo_query_backspace(model),
@@ -1007,7 +1024,6 @@ impl App for ExploreTui {
             Event::BackFromTraceDetail => crate::tempo::app::handle_back_from_trace_detail(model),
 
             // ── Loki ─────────────────────────────────────────────────────────
-
             Event::EnterLoki => crate::loki::app::handle_enter_loki(model),
             Event::LokiQueryChanged(q) => crate::loki::app::handle_loki_query_changed(model, q),
             Event::LokiExecuteQuery => crate::loki::app::handle_loki_execute_query(model),
@@ -1070,7 +1086,11 @@ impl App for ExploreTui {
         let mut indices = filtered_datasource_indices(model);
         // Favourites bubble to the top (stable sort preserves relative order within groups).
         indices.sort_by_key(|&i| {
-            if model.favourites.contains(&model.datasources[i].uid) { 0u8 } else { 1u8 }
+            if model.favourites.contains(&model.datasources[i].uid) {
+                0u8
+            } else {
+                1u8
+            }
         });
         let selected_index = if indices.is_empty() {
             0
@@ -1148,7 +1168,9 @@ impl App for ExploreTui {
         let pyroscope_series_index = if pyroscope_filtered.is_empty() {
             0
         } else {
-            model.pyroscope_series_index.min(pyroscope_filtered.len() - 1)
+            model
+                .pyroscope_series_index
+                .min(pyroscope_filtered.len() - 1)
         };
         let pyroscope_series: Vec<(String, String)> = pyroscope_filtered
             .iter()
@@ -1161,7 +1183,9 @@ impl App for ExploreTui {
         let history_selected_index = if model.history_entries.is_empty() {
             0
         } else {
-            model.history_selected_index.min(model.history_entries.len() - 1)
+            model
+                .history_selected_index
+                .min(model.history_entries.len() - 1)
         };
 
         let mut tempo_datasources: Vec<DatasourceView> = model
@@ -1336,7 +1360,11 @@ pub(crate) fn filtered_datasource_indices(model: &Model) -> Vec<usize> {
 pub(crate) fn sorted_datasource_indices(model: &Model) -> Vec<usize> {
     let mut indices = filtered_datasource_indices(model);
     indices.sort_by_key(|&i| {
-        if model.favourites.contains(&model.datasources[i].uid) { 0u8 } else { 1u8 }
+        if model.favourites.contains(&model.datasources[i].uid) {
+            0u8
+        } else {
+            1u8
+        }
     });
     indices
 }
@@ -1350,7 +1378,10 @@ pub(crate) fn active_datasource(model: &Model) -> Option<&Datasource> {
 // ── Utility helpers ───────────────────────────────────────────────────────────
 
 pub(crate) fn extract_error_message(err: &crux_http::HttpError) -> String {
-    if let crux_http::HttpError::Http { body: Some(body), .. } = err {
+    if let crux_http::HttpError::Http {
+        body: Some(body), ..
+    } = err
+    {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
             if let Some(msg) = json.get("error").and_then(|v| v.as_str()) {
                 return msg.to_string();
@@ -1540,14 +1571,12 @@ mod tests {
     #[test]
     fn pyroscope_filter_includes_pyroscope_datasources() {
         let core = make_core();
-        let response =
-            ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        let response = ResponseBuilder::ok()
+            .body(make_datasources_with_pyroscope())
+            .build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
         let vm = core.view();
-        assert!(vm
-            .datasources
-            .iter()
-            .any(|ds| ds.ds_type == "pyroscope"));
+        assert!(vm.datasources.iter().any(|ds| ds.ds_type == "pyroscope"));
     }
 
     #[test]
@@ -1557,8 +1586,9 @@ mod tests {
             url: "http://localhost:3000".into(),
             token: "test-token".into(),
         });
-        let response =
-            ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        let response = ResponseBuilder::ok()
+            .body(make_datasources_with_pyroscope())
+            .build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
 
         // Select the pyroscope datasource (index 3 after filtering: Prometheus, Loki, Prometheus2, Pyroscope, Phlare)
@@ -1566,12 +1596,17 @@ mod tests {
         core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
 
-        core.process_event(Event::EnterPyroscope { now_unix_ms: 1_000_000 });
+        core.process_event(Event::EnterPyroscope {
+            now_unix_ms: 1_000_000,
+        });
         assert_eq!(core.view().screen, ScreenView::PyroscopeMode);
 
         let series = vec![
             ("svc-a".into(), "cpu:cpu:nanoseconds:cpu:nanoseconds".into()),
-            ("svc-a".into(), "memory:alloc_objects:count:space:bytes".into()),
+            (
+                "svc-a".into(),
+                "memory:alloc_objects:count:space:bytes".into(),
+            ),
         ];
         core.process_event(Event::PyroscopeSeriesLoaded(Ok(series)));
 
@@ -1589,17 +1624,24 @@ mod tests {
             url: "http://localhost:3000".into(),
             token: "test-token".into(),
         });
-        let response = ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        let response = ResponseBuilder::ok()
+            .body(make_datasources_with_pyroscope())
+            .build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
         core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
-        core.process_event(Event::EnterPyroscope { now_unix_ms: 1_000_000 });
+        core.process_event(Event::EnterPyroscope {
+            now_unix_ms: 1_000_000,
+        });
 
         let series = vec![
             ("svc-a".into(), "cpu:cpu:nanoseconds:cpu:nanoseconds".into()),
             ("svc-b".into(), "cpu:cpu:nanoseconds:cpu:nanoseconds".into()),
-            ("svc-a".into(), "memory:alloc_objects:count:space:bytes".into()),
+            (
+                "svc-a".into(),
+                "memory:alloc_objects:count:space:bytes".into(),
+            ),
         ];
         core.process_event(Event::PyroscopeSeriesLoaded(Ok(series)));
 
@@ -1626,12 +1668,16 @@ mod tests {
             url: "http://localhost:3000".into(),
             token: "test-token".into(),
         });
-        let response = ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        let response = ResponseBuilder::ok()
+            .body(make_datasources_with_pyroscope())
+            .build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
         core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
         core.process_event(Event::SelectNext);
-        core.process_event(Event::EnterPyroscope { now_unix_ms: 1_000_000 });
+        core.process_event(Event::EnterPyroscope {
+            now_unix_ms: 1_000_000,
+        });
 
         let series = vec![
             ("alpha".into(), "cpu:cpu:nanoseconds:cpu:nanoseconds".into()),
@@ -1659,8 +1705,12 @@ mod tests {
         let fg = FlameGraph {
             names: vec!["total".into(), "func_a".into(), "func_b".into()],
             levels: vec![
-                Level { values: vec![0, 100, 0, 0] },
-                Level { values: vec![0, 60, 10, 1, 60, 40, 5, 2] },
+                Level {
+                    values: vec![0, 100, 0, 0],
+                },
+                Level {
+                    values: vec![0, 60, 10, 1, 60, 40, 5, 2],
+                },
             ],
             total: 100,
             max_self: 10,
@@ -1744,7 +1794,9 @@ mod tests {
             token: "test-token".into(),
         });
         // Datasources: [Prometheus(0), Loki(1), Prometheus2(2), Pyroscope(3), Phlare(4)]
-        let response = ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        let response = ResponseBuilder::ok()
+            .body(make_datasources_with_pyroscope())
+            .build();
         core.process_event(Event::DatasourcesLoaded(Ok(response)));
 
         // Filter to show only "Pyroscope" — the single result sits at selected_index 0,
@@ -1755,7 +1807,9 @@ mod tests {
         assert_eq!(core.view().datasources[0].name, "Pyroscope");
         assert_eq!(core.view().selected_index, 0);
 
-        core.process_event(Event::EnterPyroscope { now_unix_ms: 1_000_000 });
+        core.process_event(Event::EnterPyroscope {
+            now_unix_ms: 1_000_000,
+        });
 
         let vm = core.view();
         assert_eq!(vm.screen, ScreenView::PyroscopeMode);
@@ -1900,7 +1954,9 @@ mod tests {
             url: "http://grafana".into(),
             token: "tok".into(),
         });
-        let resp = ResponseBuilder::ok().body(make_datasources_with_pyroscope()).build();
+        let resp = ResponseBuilder::ok()
+            .body(make_datasources_with_pyroscope())
+            .build();
         core.process_event(Event::DatasourcesLoaded(Ok(resp)));
 
         // Step 1: select the right datasource
