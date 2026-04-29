@@ -31,17 +31,27 @@ lptm
 
 ## Key bindings
 
+### Universal
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+C` | Quit |
+| `Ctrl+R` | Reload / re-execute current view |
+| `Ctrl+T` | Open time range picker |
+
 ### Datasource list
 
 | Key | Action |
 |-----|--------|
 | `j` / `↓` | Move down |
 | `k` / `↑` | Move up |
-| Type | Filter datasources |
+| `/` | Open filter |
+| `f` | Toggle favourite |
+| `Tab` | Toggle history panel |
 | `Enter` | Open query editor |
 | `Esc` | Clear filter / quit |
 
-### Query editor
+### Query editor (Prometheus)
 
 | Key | Action |
 |-----|--------|
@@ -49,8 +59,62 @@ lptm
 | `Tab` | Accept completion |
 | `↑` / `↓` | Navigate history / completions |
 | `←` / `→` | Move cursor |
+| `Home` / `Ctrl+A` | Jump to line start |
+| `End` / `Ctrl+E` | Jump to line end |
 | `Esc` | Back to datasource list |
-| `Ctrl+C` | Quit |
+
+### Pyroscope
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Next service |
+| `k` / `↑` | Previous service |
+| `/` | Filter services |
+| `p` | Open profile type selector |
+| `Enter` | Load flamegraph |
+| `Tab` | Cycle views (Flamegraph → Timeline → Heatmap → SpanHeatmap) |
+| `h` / `←` | Move left in flamegraph |
+| `l` / `→` | Move right in flamegraph |
+| `k` / `↑` | Zoom out in flamegraph |
+| `j` / `↓` | Zoom in in flamegraph |
+| `Enter` / `z` | Zoom into frame |
+| `Backspace` / `o` | Zoom out frame |
+| `s` | Sandwich view |
+| `q` / `Esc` | Back to service list |
+
+### Tempo
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Execute query |
+| `j` / `↓` | Next result |
+| `k` / `↑` | Previous result |
+| `←` / `→` | Move cursor |
+| `Ctrl+A` | Jump to line start |
+| `Ctrl+E` | Jump to line end |
+| `Esc` | Back to datasource list |
+
+### Tempo trace detail
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Next span |
+| `k` / `↑` | Previous span |
+| `J` | Scroll attributes down |
+| `K` | Scroll attributes up |
+| `/` | Filter spans |
+| `Esc` | Back to trace list |
+
+### Loki
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Execute query |
+| `Tab` | Accept completion |
+| `↑` / `↓` | Navigate completions / results |
+| `Ctrl+A` | Jump to line start |
+| `Ctrl+E` | Jump to line end |
+| `Esc` | Dismiss completions / back |
 
 ## Configuration
 

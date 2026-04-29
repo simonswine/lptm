@@ -690,13 +690,16 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                             KeyCode::Backspace => {
                                                 app_core.update(Event::DatasourceFilterBackspace);
                                             }
-                                            KeyCode::Char(c) => {
+                                            KeyCode::Char(c) if key.modifiers.is_empty() => {
                                                 app_core.update(Event::DatasourceFilterInput(c));
                                             }
                                             _ => {}
                                         }
                                     }
                                     // ── Navigation mode ──────────────────────
+                                    (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                                        app_core.update(Event::FetchDatasources);
+                                    }
                                     (KeyCode::Char('/'), _) => {
                                         app_core.update(Event::DatasourceFilterFocus);
                                     }
@@ -780,6 +783,15 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     }
                                     (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
                                         app_core.update(Event::TimeRangePickerOpen { now_unix_ms: now_unix_secs() as i64 * 1000 });
+                                    }
+                                    (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                                        app_core.update(Event::ExecuteQuery);
+                                    }
+                                    (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                                        app_core.update(Event::CursorHome);
+                                    }
+                                    (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                                        app_core.update(Event::CursorEnd);
                                     }
                                     (KeyCode::Esc, _) => {
                                         history_pos = None;
@@ -937,13 +949,27 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                         KeyCode::Backspace => {
                                                             app_core.update(Event::PyroscopeServiceFilterBackspace);
                                                         }
-                                                        KeyCode::Char(c) => {
+                                                        KeyCode::Char(c) if key.modifiers.is_empty() => {
                                                             app_core.update(Event::PyroscopeServiceFilterInput(c));
                                                         }
                                                         _ => {}
                                                     }
                                                 }
                                                 // ── Navigation mode ──────────────────
+                                                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                                    let now = now_unix_secs() as i64 * 1000;
+                                                    if let Some(ds) = vm.datasources.get(vm.selected_index) {
+                                                        let vm2 = app_core.core.view();
+                                                        spawn_series_fetch(
+                                                            &pyroscope_tx,
+                                                            grafana_url.clone(),
+                                                            ds.id,
+                                                            grafana_token.clone(),
+                                                            vm2.time_range.clone(),
+                                                            now,
+                                                        );
+                                                    }
+                                                }
                                                 KeyCode::Char('/') => {
                                                     app_core.update(Event::PyroscopeServiceFilterFocus);
                                                 }
@@ -1066,7 +1092,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                                 (KeyCode::Esc, _) | (KeyCode::Enter, _) => {
                                                     app_core.update(Event::ExemplarDetailClose);
                                                 }
-                                                (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+                                                (KeyCode::Char('t'), KeyModifiers::NONE) => {
                                                     let vm2 = app_core.core.view();
                                                     if let Some(exemplar) = vm2.span_heatmap.as_ref()
                                                         .and_then(|h| h.exemplars.get(vm2.pyroscope_exemplar_index))
@@ -1127,7 +1153,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                             }
                                         } else if vm.pyroscope_sub_screen == PyroscopeSubScreenView::SpanHeatmap
                                             && key.code == KeyCode::Char('t')
-                                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                                            && key.modifiers.is_empty()
                                         {
                                             if !vm.tempo_datasources.is_empty() {
                                                 app_core.update(Event::SpanHeatmapOpenTempoPicker);
@@ -1136,6 +1162,36 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                             && key.code == KeyCode::Enter
                                         {
                                             app_core.update(Event::ExemplarDetailOpen);
+                                        } else if key.code == KeyCode::Char('r')
+                                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                                        {
+                                            let ds_id = vm.datasources.get(vm.selected_index).map(|d| d.id);
+                                            let service = vm.pyroscope_selected_service.clone();
+                                            let profile_type = vm.pyroscope_selected_profile_type.clone();
+                                            let time_range = vm.time_range.clone();
+                                            let now = now_unix_secs() as i64 * 1000;
+                                            let w = terminal.size().map(|s| s.width.saturating_sub(2)).unwrap_or(120);
+                                            let hm_w = w.saturating_sub(12);
+                                            if let Some(ds_id) = ds_id {
+                                                match vm.pyroscope_sub_screen {
+                                                    PyroscopeSubScreenView::Flamegraph => {
+                                                        if let Ok(size) = terminal.size() {
+                                                            app_core.update(Event::FlamegraphViewportChars(size.width.saturating_sub(2) as u64));
+                                                        }
+                                                        spawn_flamegraph_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type, service, time_range, now);
+                                                    }
+                                                    PyroscopeSubScreenView::Timeline => {
+                                                        spawn_timeline_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type, service, time_range, now, w);
+                                                    }
+                                                    PyroscopeSubScreenView::ProfileHeatmap => {
+                                                        spawn_heatmap_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type, service, time_range, now, hm_w);
+                                                    }
+                                                    PyroscopeSubScreenView::SpanHeatmap => {
+                                                        spawn_span_heatmap_fetch(&pyroscope_tx, grafana_url.clone(), ds_id, grafana_token.clone(), profile_type, service, time_range, now, hm_w);
+                                                    }
+                                                    PyroscopeSubScreenView::ServiceList => {}
+                                                }
+                                            }
                                         } else {
                                         match (&vm.pyroscope_sub_screen, key.code) {
                                             // Back to service list
@@ -1247,6 +1303,27 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
                                         app_core.update(Event::TimeRangePickerOpen { now_unix_ms: now_unix_secs() as i64 * 1000 });
                                     }
+                                    (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                                        let vm2 = app_core.core.view();
+                                        if !vm2.tempo_query.trim().is_empty() {
+                                            let ds_uid = vm2
+                                                .datasources
+                                                .get(vm2.selected_index)
+                                                .map(|d| d.uid.clone());
+                                            let query = vm2.tempo_query.clone();
+                                            let time_range = vm2.time_range.clone();
+                                            app_core.update(Event::TempoExecuteQuery);
+                                            if let Some(uid) = ds_uid {
+                                                spawn_tempo_search(&tempo_tx, grafana_url.clone(), uid, grafana_token.clone(), query, time_range);
+                                            }
+                                        }
+                                    }
+                                    (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                                        app_core.update(Event::TempoQueryCursorHome);
+                                    }
+                                    (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                                        app_core.update(Event::TempoQueryCursorEnd);
+                                    }
                                     (KeyCode::Esc, _) => {
                                         app_core.update(Event::BackFromTempo);
                                     }
@@ -1330,7 +1407,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                     (KeyCode::Right, _) => {
                                         app_core.update(Event::TempoQueryCursorRight);
                                     }
-                                    (KeyCode::Char(c), _) => {
+                                    (KeyCode::Char(c), KeyModifiers::NONE) => {
                                         app_core.update(Event::TempoQueryInput(c));
                                     }
                                     _ => {}
@@ -1345,7 +1422,7 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         KeyCode::Backspace => {
                                             app_core.update(Event::TempoTraceDetailFilterBackspace);
                                         }
-                                        KeyCode::Char(c) => {
+                                        KeyCode::Char(c) if key.modifiers.is_empty() => {
                                             app_core.update(Event::TempoTraceDetailFilterInput(c));
                                         }
                                         _ => {}
@@ -1353,6 +1430,25 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                 } else {
                                     match (key.code, key.modifiers) {
                                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                                        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                                            let vm2 = app_core.core.view();
+                                            let ds_uid = vm2
+                                                .datasources
+                                                .get(vm2.selected_index)
+                                                .map(|d| d.uid.clone());
+                                            let trace_id = vm2.trace_detail_trace_id.clone();
+                                            if !trace_id.is_empty() {
+                                                if let Some(uid) = ds_uid {
+                                                    spawn_trace_detail_fetch(
+                                                        &tempo_tx,
+                                                        grafana_url.clone(),
+                                                        uid,
+                                                        grafana_token.clone(),
+                                                        trace_id,
+                                                    );
+                                                }
+                                            }
+                                        }
                                         (KeyCode::Esc, _) => {
                                             app_core.update(Event::BackFromTraceDetail);
                                         }
@@ -1403,6 +1499,35 @@ async fn run(terminal: &mut DefaultTerminal, args: Args) -> Result<()> {
                                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
                                         (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
                                             app_core.update(Event::TimeRangePickerOpen { now_unix_ms: now_unix_secs() as i64 * 1000 });
+                                        }
+                                        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                                            let query = loki_ui_state
+                                                .as_ref()
+                                                .map(|s| s.query().to_string())
+                                                .unwrap_or_default();
+                                            if !query.trim().is_empty() {
+                                                let vm2 = app_core.core.view();
+                                                let ds_id = vm2.datasources
+                                                    .get(vm2.selected_index)
+                                                    .map(|d| d.id);
+                                                let time_range = vm2.time_range.clone();
+                                                drop(vm2);
+                                                if let Some(ref mut s) = loki_ui_state {
+                                                    s.query_dirty = false;
+                                                }
+                                                app_core.update(Event::LokiQueryChanged(query.clone()));
+                                                app_core.update(Event::LokiExecuteQuery);
+                                                if let Some(ds_id) = ds_id {
+                                                    spawn_loki_query(
+                                                        &loki_tx,
+                                                        grafana_url.clone(),
+                                                        ds_id,
+                                                        grafana_token.clone(),
+                                                        query,
+                                                        time_range,
+                                                    );
+                                                }
+                                            }
                                         }
 
                                         (KeyCode::Esc, _) => {
@@ -1831,10 +1956,10 @@ fn ui(frame: &mut Frame, vm: &ViewModel, loki_state: Option<&loki::LokiUiState>)
                 "Esc: Cancel  j/k: Select  Enter: Query Tempo"
             }
             PyroscopeSubScreenView::SpanHeatmap if vm.exemplar_detail_open => {
-                "Esc/Enter: Close  Ctrl+T: Open Trace  Ctrl+P: Open Profile"
+                "Esc/Enter: Close  t: Open Trace  Ctrl+P: Open Profile"
             }
             PyroscopeSubScreenView::SpanHeatmap => {
-                "Esc: List  Tab: Switch View  j/k: Exemplar Next/Prev  Enter: Detail  Ctrl+T: Lookup Trace"
+                "Esc: List  Tab: Switch View  j/k: Exemplar Next/Prev  Enter: Detail  t: Lookup Trace"
             }
         },
     };

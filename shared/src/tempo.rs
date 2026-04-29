@@ -82,6 +82,16 @@ pub mod app {
         render()
     }
 
+    pub fn handle_tempo_cursor_home(model: &mut Model) -> Command<Effect, Event> {
+        model.tempo_cursor_pos = 0;
+        render()
+    }
+
+    pub fn handle_tempo_cursor_end(model: &mut Model) -> Command<Effect, Event> {
+        model.tempo_cursor_pos = model.tempo_query.len();
+        render()
+    }
+
     pub fn handle_tempo_execute_query(model: &mut Model) -> Command<Effect, Event> {
         if model.tempo_query.trim().is_empty() {
             return render();
